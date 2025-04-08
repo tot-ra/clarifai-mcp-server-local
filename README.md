@@ -1,8 +1,8 @@
 ![image](https://github.com/user-attachments/assets/9697b203-07b2-4f74-9cb4-0bea5c886f09)
 
-# 🌀 Clarifai MCP Server (Local)
+# 🌀 Clarifai MCP Server
 
-This hackday project provides a Model Context Protocol (MCP) server that acts as a bridge to the [Clarifai](https://www.clarifai.com/) API and is meant to run on user's machine.
+This hackday project provides a Model Context Protocol (MCP) server that acts as a bridge to the [Clarifai](https://www.clarifai.com/) API and is meant to run on user's machine (so locally).
 
 It allows MCP clients (like IDE extensions) to interact with Clarifai, such as image generation and inference, using standard MCP requests without overloading LLM context with heavy binary results.
 

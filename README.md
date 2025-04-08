@@ -56,14 +56,10 @@ Example MCP settings entry (`cline_mcp_settings.json`), for example for Cline:
 {
   "mcpServers": {
     "clarifai": {
-      "command": "/path/to/your/clarifai-mcp-server-local/mcp_binary", // Use absolute path or ensure it's in PATH
+      "command": "~/clarifai-mcp-server-local/mcp_binary",
       "args": [
-        "--pat", "YOUR_CLARIFAI_PAT", // Required: Your Clarifai Personal Access Token
-        "--output-path", "/path/to/save/images/", // Optional: Where to save large images (defaults to system temp dir)
-        // Optional flags with defaults:
-        // "--log-level", "INFO", // DEBUG, INFO, WARN, ERROR
-        // "--grpc-addr", "api.clarifai.com:443",
-        // "--timeout", "120" // gRPC call timeout in seconds
+        "--pat", "YOUR_CLARIFAI_PAT",
+        "--output-path", "~/Desktop/",
       ],
     }
   }

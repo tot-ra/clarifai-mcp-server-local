@@ -16,17 +16,10 @@ Please create 3 txt files with songs on different topics.
 The for every text file, generate an image using clarifai by using the song as a description
 ```
 
-<img src="./docs/Screenshot 2025-04-09 at 01.02.31.png" width=400 />
-<img src="./docs/Screenshot 2025-04-09 at 01.02.14.png" width=400 />
+<img src="./docs/Screenshot 2025-04-09 at 01.02.31.png" width=400 /><img src="./docs/Screenshot 2025-04-09 at 01.02.14.png" width=400 />
 
 
-<img src="./docs/results/generated_image_1744149572853349000_3412.png" width=200 />
-<img src="./docs/results/generated_image_1744149613297854000_674.png" width=200 />
-<img src="./docs/results/generated_image_1744149654699582000_6792.png" width=200 />
-
-### Bonus
-Guess which mp3 suits the image the most...
-
+[<img src="./docs/results/generated_image_1744149572853349000_3412.png" width=200 />](https://suno.com/song/3bd22d0f-3d88-4002-b1cc-ca3a3e14bf84?sh=XBiPBEm7hYz2FnBG)[<img src="./docs/results/generated_image_1744149613297854000_674.png" width=200 />](https://suno.com/song/d4f63bd4-a6cd-45f2-8bc1-0dea9ee7be01?sh=4UF4xlHkAkSbynRm)[<img src="./docs/results/generated_image_1744149654699582000_6792.png" width=200 />](https://suno.com/song/1b9bef83-ed45-466a-b118-0c5481b2b6e9?sh=V0WDqyCzRGPCr4Vh)
 
 
 ## Configuring MCP server

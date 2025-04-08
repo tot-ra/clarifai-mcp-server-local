@@ -35,16 +35,16 @@ go mod tidy
 ```
 
 **Build the Binary:**
-Use the `go build` command. Specify the output path and target architecture if needed (example for macOS ARM):
+Use the `go build` command, targeting the main package within the `cmd/server` directory. Specify the output path and target architecture if needed (example for macOS ARM):
 ```bash
 # For macOS ARM
-GOOS=darwin GOARCH=arm64 go build -o ./mcp_binary ./...
+GOOS=darwin GOARCH=arm64 go build -o ./mcp_binary ./cmd/server/...
 
 # For Linux AMD64
-# GOOS=linux GOARCH=amd64 go build -o ./mcp_binary ./...
+# GOOS=linux GOARCH=amd64 go build -o ./mcp_binary ./cmd/server/...
 
 # For Windows AMD64
-# GOOS=windows GOARCH=amd64 go build -o ./mcp_binary.exe ./...
+# GOOS=windows GOARCH=amd64 go build -o ./mcp_binary.exe ./cmd/server/...
 ```
 
 This will create an executable file named `mcp_binary` (or `mcp_binary.exe` on Windows) in the project's root directory.
@@ -56,10 +56,14 @@ Example MCP settings entry (`cline_mcp_settings.json`), for example for Cline:
 {
   "mcpServers": {
     "clarifai": {
-      "command": "~/clarifai-mcp-server-local/mcp_binary",
+      "command": "/path/to/your/clarifai-mcp-server-local/mcp_binary", // Use absolute path or ensure it's in PATH
       "args": [
-        "--pat", "YOUR_CLARIFAI_PAT",
-        "--output-path", "~/Desktop/"
+        "--pat", "YOUR_CLARIFAI_PAT", // Required: Your Clarifai Personal Access Token
+        "--output-path", "/path/to/save/images/", // Optional: Where to save large images (defaults to system temp dir)
+        // Optional flags with defaults:
+        // "--log-level", "INFO", // DEBUG, INFO, WARN, ERROR
+        // "--grpc-addr", "api.clarifai.com:443",
+        // "--timeout", "120" // gRPC call timeout in seconds
       ],
     }
   }
@@ -69,12 +73,29 @@ Example MCP settings entry (`cline_mcp_settings.json`), for example for Cline:
 Replace `YOUR_CLARIFAI_PAT` with your [Clarifai PAT token](https://clarifai.com/settings/security).
 
 
+## Testing
+
+Unit tests have been added for several packages. To run all tests, bypass the cache, and see verbose output (including individual test names and status):
+
+```bash
+cd clarifai-mcp-server-local
+go test -v -count=1 ./...
+```
+
 
 ## Architecture Overview
 
-The server listens for JSON-RPC requests over standard input/output (stdio). When it receives a request, it translates it into a corresponding gRPC call to the Clarifai API. The response from the Clarifai API is then formatted back into a JSON-RPC response and sent back to the client via stdio.
+The server listens for JSON-RPC requests over standard input/output (stdio), parses them, and routes them to the appropriate tool handler (`generate_image` or `infer_image`). The handler constructs a gRPC request, adds authentication using the provided PAT, and calls the Clarifai API. The response from the Clarifai API is then formatted back into a JSON-RPC response and sent back to the client via stdio. Large image results can optionally be saved to disk instead of being sent back directly.
 
-Authentication is handled via a Personal Access Token (PAT) provided as a command-line argument (`--pat`) when starting the server.
+The codebase is structured into several packages:
+- `cmd/server`: Main application entry point.
+- `internal/config`: Configuration loading (flags).
+- `internal/mcp`: JSON-RPC request/response handling over stdio.
+- `internal/clarifai`: gRPC client setup and API interaction helpers.
+- `internal/tools`: Implementation of the MCP tools (`generate_image`, `infer_image`).
+- `internal/utils`: Filesystem utilities (e.g., saving images).
+
+Authentication is handled via a Personal Access Token (PAT) provided as a required command-line argument (`--pat`) when starting the server.
 
 ```mermaid
 sequenceDiagram

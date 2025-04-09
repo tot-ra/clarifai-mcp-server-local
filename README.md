@@ -59,10 +59,9 @@ Example MCP settings entry (`cline_mcp_settings.json`), for example for Cline:
       "command": "~/clarifai-mcp-server-local/mcp_binary",
       "args": [
         "--pat", "YOUR_CLARIFAI_PAT",
-        "--output-path", "~/Desktop/", // Optional: Where to save large images
-        // Optional flags for default resource listing:
-        // "--default-user-id", "your_user_id",
-        // "--default-app-id", "your_app_id",
+        "--output-path", "~/Desktop/",
+        "--default-user-id", "your_user_id",
+        "--default-app-id", "your_app_id",
       ],
     }
   }

@@ -48,3 +48,16 @@ type RPCError struct {
 	Message string      `json:"message"`
 	Data    interface{} `json:"data,omitempty"`
 }
+
+// NewErrorResponse creates a JSONRPCResponse populated with an error.
+func NewErrorResponse(id interface{}, code int, message string, data interface{}) JSONRPCResponse {
+	return JSONRPCResponse{
+		JSONRPC: "2.0",
+		ID:      id,
+		Error: &RPCError{
+			Code:    code,
+			Message: message,
+			Data:    data,
+		},
+	}
+}

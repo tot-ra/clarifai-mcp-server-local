@@ -2,288 +2,436 @@ package tools
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"testing"
+	"time"
 
 	"clarifai-mcp-server-local/clarifai"
 	"clarifai-mcp-server-local/config"
 	"clarifai-mcp-server-local/mcp"
 
-	pb "github.com/Clarifai/clarifai-go-grpc/proto/clarifai/api" // Import the pb package
+	pb "github.com/Clarifai/clarifai-go-grpc/proto/clarifai/api"
+	statuspb "github.com/Clarifai/clarifai-go-grpc/proto/clarifai/api/status" // Import status proto
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
-	"google.golang.org/grpc" // Import grpc for CallOption
+	"google.golang.org/grpc" // Import grpc package
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
-// Mock Clarifai Client for testing
+// Mock Clarifai Client
 type MockClarifaiAPIClient struct {
 	mock.Mock
-	// clarifai.V2ClientInterface // Remove embedded interface to rely on duck typing for mocks
 }
 
-// Implement methods used by the handler using the correct pb types and grpc.CallOption
+// Implement V2ClientInterface for MockClarifaiAPIClient
 func (m *MockClarifaiAPIClient) GetInput(ctx context.Context, req *pb.GetInputRequest, opts ...grpc.CallOption) (*pb.SingleInputResponse, error) {
-	// To satisfy the mock call with variadic args, we might need to pass them explicitly or handle them.
-	// For simplicity in testing parsing logic, we can ignore opts in the mock assertion if not needed.
-	args := m.Called(ctx, req) // Pass only ctx and req to Called if opts are not asserted
-	if args.Get(0) == nil {
-		return nil, args.Error(1) // Return error specified in mock setup
+	// Convert opts to []interface{} for mock.Called
+	mockOpts := make([]interface{}, len(opts))
+	for i, opt := range opts {
+		mockOpts[i] = opt
 	}
-	// Return response specified in mock setup
+	args := m.Called(ctx, req) // Do not pass mockOpts explicitly
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
 	return args.Get(0).(*pb.SingleInputResponse), args.Error(1)
 }
 
-func (m *MockClarifaiAPIClient) GetModel(ctx context.Context, req *pb.GetModelRequest, opts ...grpc.CallOption) (*pb.SingleModelResponse, error) {
-	args := m.Called(ctx, req) // Pass only ctx and req to Called
-	if args.Get(0) == nil {
-		return nil, args.Error(1) // Return error specified in mock setup
+func (m *MockClarifaiAPIClient) ListInputs(ctx context.Context, req *pb.ListInputsRequest, opts ...grpc.CallOption) (*pb.MultiInputResponse, error) {
+	mockOpts := make([]interface{}, len(opts))
+	for i, opt := range opts {
+		mockOpts[i] = opt
 	}
-	// Return response specified in mock setup
+	args := m.Called(ctx, req) // Do not pass mockOpts explicitly
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).(*pb.MultiInputResponse), args.Error(1)
+}
+
+func (m *MockClarifaiAPIClient) PostInputsSearches(ctx context.Context, req *pb.PostInputsSearchesRequest, opts ...grpc.CallOption) (*pb.MultiSearchResponse, error) {
+	mockOpts := make([]interface{}, len(opts))
+	for i, opt := range opts {
+		mockOpts[i] = opt
+	}
+	args := m.Called(ctx, req) // Do not pass mockOpts explicitly
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).(*pb.MultiSearchResponse), args.Error(1)
+}
+
+func (m *MockClarifaiAPIClient) GetModel(ctx context.Context, req *pb.GetModelRequest, opts ...grpc.CallOption) (*pb.SingleModelResponse, error) {
+	mockOpts := make([]interface{}, len(opts))
+	for i, opt := range opts {
+		mockOpts[i] = opt
+	}
+	args := m.Called(ctx, req) // Do not pass mockOpts explicitly
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
 	return args.Get(0).(*pb.SingleModelResponse), args.Error(1)
 }
 
-// Add mocks for annotation methods if/when implemented using pb types and grpc.CallOption
-func (m *MockClarifaiAPIClient) ListAnnotations(ctx context.Context, req *pb.ListAnnotationsRequest, opts ...grpc.CallOption) (*pb.ListAnnotationsResponse, error) {
-	args := m.Called(ctx, req) // Pass only ctx and req to Called
-	if args.Get(0) == nil {
-		return nil, args.Error(1) // Return error specified in mock setup
+func (m *MockClarifaiAPIClient) ListModels(ctx context.Context, req *pb.ListModelsRequest, opts ...grpc.CallOption) (*pb.MultiModelResponse, error) {
+	mockOpts := make([]interface{}, len(opts))
+	for i, opt := range opts {
+		mockOpts[i] = opt
 	}
-	// Return response specified in mock setup
-	return args.Get(0).(*pb.ListAnnotationsResponse), args.Error(1)
+	args := m.Called(ctx, req) // Do not pass mockOpts explicitly
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).(*pb.MultiModelResponse), args.Error(1)
 }
-func (m *MockClarifaiAPIClient) GetAnnotation(ctx context.Context, req *pb.GetAnnotationRequest, opts ...grpc.CallOption) (*pb.SingleAnnotationResponse, error) {
-	args := m.Called(ctx, req) // Pass only ctx and req to Called
-	if args.Get(0) == nil {
-		return nil, args.Error(1) // Return error specified in mock setup
+
+func (m *MockClarifaiAPIClient) PostModelOutputs(ctx context.Context, req *pb.PostModelOutputsRequest, opts ...grpc.CallOption) (*pb.MultiOutputResponse, error) {
+	mockOpts := make([]interface{}, len(opts))
+	for i, opt := range opts {
+		mockOpts[i] = opt
 	}
-	// Return response specified in mock setup
+	args := m.Called(ctx, req) // Do not pass mockOpts explicitly
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).(*pb.MultiOutputResponse), args.Error(1)
+}
+
+// Add missing methods to satisfy the interface
+func (m *MockClarifaiAPIClient) ListAnnotations(ctx context.Context, req *pb.ListAnnotationsRequest, opts ...grpc.CallOption) (*pb.MultiAnnotationResponse, error) {
+	mockOpts := make([]interface{}, len(opts))
+	for i, opt := range opts {
+		mockOpts[i] = opt
+	}
+	args := m.Called(ctx, req) // Do not pass mockOpts explicitly
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).(*pb.MultiAnnotationResponse), args.Error(1)
+}
+
+func (m *MockClarifaiAPIClient) GetAnnotation(ctx context.Context, req *pb.GetAnnotationRequest, opts ...grpc.CallOption) (*pb.SingleAnnotationResponse, error) {
+	mockOpts := make([]interface{}, len(opts))
+	for i, opt := range opts {
+		mockOpts[i] = opt
+	}
+	args := m.Called(ctx, req) // Do not pass mockOpts explicitly
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
 	return args.Get(0).(*pb.SingleAnnotationResponse), args.Error(1)
 }
 
-// Add ListInputs mock (needed for interface satisfaction)
-func (m *MockClarifaiAPIClient) ListInputs(ctx context.Context, req *pb.ListInputsRequest, opts ...grpc.CallOption) (*pb.ListInputsResponse, error) {
-	args := m.Called(ctx, req)
-	if args.Get(0) == nil {
-		return nil, args.Error(1)
-	}
-	return args.Get(0).(*pb.ListInputsResponse), args.Error(1)
-}
+// --- Test Setup ---
 
-// Add PostModelOutputs mock (needed for interface satisfaction)
-func (m *MockClarifaiAPIClient) PostModelOutputs(ctx context.Context, req *pb.PostModelOutputsRequest, opts ...grpc.CallOption) (*pb.PostModelOutputsResponse, error) {
-	args := m.Called(ctx, req)
-	if args.Get(0) == nil {
-		return nil, args.Error(1)
-	}
-	return args.Get(0).(*pb.PostModelOutputsResponse), args.Error(1)
-}
-
-// Add PostAnnotationsSearches mock if needed
-// func (m *MockClarifaiAPIClient) PostAnnotationsSearches(...) ...
-
-func setupTestHandler() *Handler {
+func setupTestHandler(mockAPI *MockClarifaiAPIClient) *Handler {
 	cfg := &config.Config{
 		Pat:        "test-pat",
-		TimeoutSec: 10,
-		OutputPath: "/tmp",
+		OutputPath: "/tmp/clarifai-test-output",
+		TimeoutSec: 5,
 	}
-	mockAPIClient := new(MockClarifaiAPIClient)
-	mockClient := &clarifai.Client{API: mockAPIClient} // Use the mock API client
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	slog.SetDefault(logger) // Set default logger for handler
-
-	return NewHandler(mockClient, cfg)
+	// Ensure mockAPI implements the interface before creating the client
+	var _ clarifai.V2ClientInterface = (*MockClarifaiAPIClient)(nil)
+	mockClarifaiClient := &clarifai.Client{API: mockAPI}
+	handler := NewHandler(mockClarifaiClient, cfg)
+	handler.logger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug})) // Use stderr for test logs
+	return handler
 }
 
-func TestHandleReadResource_URIParsing(t *testing.T) {
-	handler := setupTestHandler()
+// Helper to create a success status proto
+func successStatus() *statuspb.Status {
+	return &statuspb.Status{Code: statuspb.StatusCode_SUCCESS}
+}
+
+// --- Helper Function Tests ---
+
+func TestPrepareGrpcCall(t *testing.T) {
+	mockAPI := new(MockClarifaiAPIClient)
+	handler := setupTestHandler(mockAPI)
+
+	t.Run("Successful call", func(t *testing.T) {
+		ctx, cancel, rpcErr := handler.prepareGrpcCall(context.Background())
+		assert.NotNil(t, ctx)
+		assert.NotNil(t, cancel)
+		assert.Nil(t, rpcErr)
+		defer cancel()
+		// Check timeout
+		deadline, ok := ctx.Deadline()
+		assert.True(t, ok)
+		assert.WithinDuration(t, time.Now().Add(time.Duration(handler.timeoutSec)*time.Second), deadline, 1*time.Second)
+	})
+
+	t.Run("Missing PAT", func(t *testing.T) {
+		handlerNoPat := setupTestHandler(mockAPI)
+		handlerNoPat.pat = ""
+		ctx, cancel, rpcErr := handlerNoPat.prepareGrpcCall(context.Background())
+		assert.Nil(t, ctx)
+		assert.Nil(t, cancel)
+		assert.NotNil(t, rpcErr)
+		assert.Equal(t, -32001, rpcErr.Code)
+		assert.Contains(t, rpcErr.Message, "PAT not configured")
+	})
+
+	t.Run("Missing Client", func(t *testing.T) {
+		handlerNoClient := setupTestHandler(mockAPI)
+		handlerNoClient.clarifaiClient = nil
+		ctx, cancel, rpcErr := handlerNoClient.prepareGrpcCall(context.Background())
+		assert.Nil(t, ctx)
+		assert.Nil(t, cancel)
+		assert.NotNil(t, rpcErr)
+		assert.Equal(t, -32001, rpcErr.Code)
+		assert.Contains(t, rpcErr.Message, "client not initialized")
+	})
+}
+
+func TestHandleApiError(t *testing.T) {
+	mockAPI := new(MockClarifaiAPIClient)
+	handler := setupTestHandler(mockAPI)
+
+	t.Run("Not Found Error", func(t *testing.T) {
+		grpcErr := status.Error(codes.NotFound, "resource not found")
+		rpcErr := handler.handleApiError(grpcErr, "inputs", "input123")
+		assert.NotNil(t, rpcErr)
+		assert.Equal(t, -32002, rpcErr.Code)
+		assert.Equal(t, "Resource not found", rpcErr.Message)
+		assert.Equal(t, "inputs/input123", rpcErr.Data)
+	})
+
+	t.Run("Permission Denied Error", func(t *testing.T) {
+		grpcErr := status.Error(codes.PermissionDenied, "invalid PAT")
+		rpcErr := handler.handleApiError(grpcErr, "models", "model456")
+		assert.NotNil(t, rpcErr)
+		// Correct assertion based on clarifai.MapGRPCErrorToJSONRPC
+		assert.Equal(t, -32003, rpcErr.Code)
+		assert.Equal(t, "invalid PAT", rpcErr.Message) // Should return the original gRPC message
+	})
+
+	t.Run("Generic gRPC Error", func(t *testing.T) {
+		grpcErr := status.Error(codes.Unavailable, "connection failed")
+		rpcErr := handler.handleApiError(grpcErr, "inputs", "")
+		assert.NotNil(t, rpcErr)
+		// Correct assertion based on clarifai.MapGRPCErrorToJSONRPC
+		assert.Equal(t, -32004, rpcErr.Code)
+		assert.Equal(t, "connection failed", rpcErr.Message) // Should return the original gRPC message
+	})
+
+	t.Run("Non-gRPC Error", func(t *testing.T) {
+		genericErr := errors.New("something went wrong")
+		rpcErr := handler.handleApiError(genericErr, "outputs", "out789")
+		assert.NotNil(t, rpcErr)
+		assert.Equal(t, -32000, rpcErr.Code)
+		// Correct assertion based on clarifai.MapGRPCErrorToJSONRPC
+		assert.Equal(t, "Internal server error: something went wrong", rpcErr.Message)
+	})
+}
+
+// --- Request Routing Tests ---
+
+func TestHandleRequest_Routing(t *testing.T) {
+	mockAPI := new(MockClarifaiAPIClient)
+	handler := setupTestHandler(mockAPI)
 
 	testCases := []struct {
-		name          string
-		uri           string
-		expectedError bool
-		errorCode     int // Expected MCP error code if error is expected
-		errorContains string
+		name         string
+		method       string
+		expectedNil  bool
+		expectedCode int // 0 for success/result, error code otherwise
 	}{
-		// --- Valid URIs ---
-		{
-			name:          "Valid Get Input",
-			uri:           "clarifai://user1/app1/inputs/input123",
-			expectedError: false, // Expecting GetInput to be called (mocked later if needed)
-		},
-		{
-			name:          "Valid Get Model",
-			uri:           "clarifai://user1/app1/models/model456",
-			expectedError: false, // Expecting GetModel to be called
-		},
-		{
-			name:          "Valid Get Annotation (Placeholder)",
-			uri:           "clarifai://user1/app1/annotations/anno789",
-			expectedError: true, // Expecting "not yet implemented" error
-			errorCode:     -32000,
-			errorContains: "GetAnnotation not yet implemented",
-		},
-		{
-			name:          "Valid List Annotations (Placeholder)",
-			uri:           "clarifai://user1/app1/annotations",
-			expectedError: true, // Expecting "not yet implemented" error
-			errorCode:     -32000,
-			errorContains: "ListAnnotations not yet implemented",
-		},
-		{
-			name:          "Valid List Annotations with Query (Placeholder)",
-			uri:           "clarifai://user1/app1/annotations?query=test",
-			expectedError: true, // Expecting "not yet implemented" error
-			errorCode:     -32000,
-			errorContains: "PostAnnotationsSearches (search with query) not yet implemented",
-		},
-		{
-			name:          "Valid List Annotations for Input (Placeholder)",
-			uri:           "clarifai://user1/app1/inputs/input123/annotations",
-			expectedError: true, // Expecting "not yet implemented" error
-			errorCode:     -32000,
-			errorContains: "ListAnnotations for Input not yet implemented",
-		},
-		// --- Invalid URIs ---
-		{
-			name:          "Missing URI",
-			uri:           "",
-			expectedError: true,
-			errorCode:     -32602,
-			errorContains: "Missing required 'uri' parameter",
-		},
-		{
-			name:          "Invalid Scheme",
-			uri:           "http://user1/app1/inputs/input123",
-			expectedError: true,
-			errorCode:     -32602,
-			errorContains: "Invalid URI format. Expected clarifai://...",
-		},
-		{
-			name:          "Missing User ID (Host)",
-			uri:           "clarifai:///app1/inputs/input123",
-			expectedError: true,
-			errorCode:     -32602,
-			errorContains: "Missing user_id",
-		},
-		{
-			name:          "Missing App ID",
-			uri:           "clarifai://user1//inputs/input123", // Note the double slash
-			expectedError: true,
-			errorCode:     -32602,
-			errorContains: "Missing app_id",
-		},
-		{
-			name:          "Too Few Path Parts (1)",
-			uri:           "clarifai://user1/app1",
-			expectedError: true,
-			errorCode:     -32602,
-			errorContains: "Expected at least clarifai://{user_id}/{app_id}/{resource_type}",
-		},
-		{
-			name:          "Too Few Path Parts (0)",
-			uri:           "clarifai://user1/",
-			expectedError: true,
-			errorCode:     -32602,
-			errorContains: "Expected at least clarifai://{user_id}/{app_id}/{resource_type}",
-		},
-		{
-			name:          "Too Many Path Parts (5)",
-			uri:           "clarifai://user1/app1/inputs/id1/annotations/sub",
-			expectedError: true,
-			errorCode:     -32000, // Generic internal error for unexpected path length
-			errorContains: "Unexpected number of path segments: 5",
-		},
-		{
-			name:          "Invalid Resource Type for List (case 2)",
-			uri:           "clarifai://user1/app1/datasets", // Assuming datasets aren't listable via read yet
-			expectedError: true,
-			errorCode:     -32000,
-			errorContains: "listing resource type 'datasets' via resources/read is not supported",
-		},
-		{
-			name:          "Invalid Resource Type for Get (case 3)",
-			uri:           "clarifai://user1/app1/workflows/wf1", // Assuming workflows aren't gettable via read yet
-			expectedError: true,
-			errorCode:     -32000,
-			errorContains: "reading specific resource type 'workflows' is not supported",
-		},
-		{
-			name:          "Invalid Parent Resource Type for Sub-List (case 4)",
-			uri:           "clarifai://user1/app1/models/model1/annotations",
-			expectedError: true,
-			errorCode:     -32000,
-			errorContains: "listing sub-resources for parent type 'models' is not supported",
-		},
-		{
-			name:          "Invalid Sub-Resource Type for Sub-List (case 4)",
-			uri:           "clarifai://user1/app1/inputs/input1/versions",
-			expectedError: true,
-			errorCode:     -32000,
-			errorContains: "unsupported sub-resource type 'versions' for parent 'inputs'",
-		},
-		{
-			name:          "Empty Resource ID for Get (case 3)",
-			uri:           "clarifai://user1/app1/inputs/",
-			expectedError: true,
-			errorCode:     -32000,
-			errorContains: "invalid URI for specific resource read: resource ID cannot be empty or '*'",
-		},
-		{
-			name:          "Wildcard Resource ID for Get (case 3)",
-			uri:           "clarifai://user1/app1/inputs/*",
-			expectedError: true,
-			errorCode:     -32000,
-			errorContains: "invalid URI for specific resource read: resource ID cannot be empty or '*'",
-		},
-		{
-			name:          "Empty Parent ID for Sub-List (case 4)",
-			uri:           "clarifai://user1/app1/inputs//annotations",
-			expectedError: true,
-			errorCode:     -32000,
-			errorContains: "invalid URI for sub-resource list: parent resource ID cannot be empty or '*'",
-		},
-		{
-			name:          "Wildcard Parent ID for Sub-List (case 4)",
-			uri:           "clarifai://user1/app1/inputs/*/annotations",
-			expectedError: true,
-			errorCode:     -32000,
-			errorContains: "invalid URI for sub-resource list: parent resource ID cannot be empty or '*'",
-		},
+		{"Initialize", "initialize", false, 0},
+		{"List Tools", "tools/list", false, 0},
+		{"Call Tool Known", "tools/call", false, -32601}, // Expect tool not found initially
+		{"List Templates", "resources/templates/list", false, 0},
+		{"Read Resource", "resources/read", false, -32602},            // Expect missing URI
+		{"List Resource (via read)", "resources/list", false, -32602}, // Expect missing URI
+		{"Unknown Method", "unknown/method", false, -32601},
+		{"Notification", "notifications/something", true, 0},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			// Mock necessary calls if the URI is expected to be valid for a specific action
-			// For now, we primarily test parsing errors or placeholder errors.
-			// Example for a valid GetInput call (if we wanted to test deeper):
-			// if tc.uri == "clarifai://user1/app1/inputs/input123" {
-			// 	mockAPI := handler.clarifaiClient.API.(*MockClarifaiAPIClient)
-			// 	mockAPI.On("GetInput", mock.Anything, mock.AnythingOfType("*clarifai.GetInputRequest")).Return(&clarifai.SingleInputResponse{Status: &statuspb.Status{Code: statuspb.StatusCode_SUCCESS}, Input: &pb.Input{Id: "input123"}}, nil)
-			// }
-
 			req := mcp.JSONRPCRequest{
 				JSONRPC: "2.0",
-				ID:      "test-id-" + tc.name,
-				Method:  "resources/read", // Testing the read handler directly
-				Params:  mcp.RequestParams{URI: tc.uri},
+				ID:      1,
+				Method:  tc.method,
+				Params:  mcp.RequestParams{}, // Empty params for routing test
+			}
+			// Special case for call tool to avoid nil pointer
+			if tc.method == "tools/call" {
+				req.Params.Name = "nonexistent_tool"
 			}
 
-			resp := handler.handleReadResource(req)
+			resp := handler.HandleRequest(req)
 
-			if tc.expectedError {
-				assert.NotNil(t, resp.Error, "Expected an error but got none")
-				if resp.Error != nil {
-					assert.Equal(t, tc.errorCode, resp.Error.Code, "Error code mismatch")
-					assert.Contains(t, resp.Error.Message, tc.errorContains, "Error message mismatch")
-				}
+			if tc.expectedNil {
+				assert.Nil(t, resp)
 			} else {
-				assert.Nil(t, resp.Error, "Expected no error but got: %v", resp.Error)
-				// Optionally assert on resp.Result if testing successful calls
+				assert.NotNil(t, resp)
+				if tc.expectedCode == 0 {
+					assert.Nil(t, resp.Error)
+					assert.NotNil(t, resp.Result)
+				} else {
+					assert.NotNil(t, resp.Error)
+					assert.Equal(t, tc.expectedCode, resp.Error.Code)
+					assert.Nil(t, resp.Result)
+				}
 			}
 		})
 	}
 }
 
-// Add more tests for handleCallTool, handleInitialize etc. if needed
+// --- Resource Handling Tests (Placeholder - Add more specific tests) ---
+
+func TestHandleReadResource_GetInput_Success(t *testing.T) {
+	mockAPI := new(MockClarifaiAPIClient)
+	handler := setupTestHandler(mockAPI)
+	reqID := "req-get-input-1"
+	userID := "test-user"
+	appID := "test-app"
+	inputID := "input-123"
+	uri := fmt.Sprintf("clarifai://%s/%s/inputs/%s", userID, appID, inputID)
+
+	mockInput := &pb.Input{Id: inputID, Data: &pb.Data{Text: &pb.Text{Raw: "hello"}}}
+	mockResp := &pb.SingleInputResponse{ // Correct response type
+		Status: successStatus(), // Use helper
+		Input:  mockInput,
+	}
+
+	mockAPI.On("GetInput", mock.Anything, mock.MatchedBy(func(r *pb.GetInputRequest) bool {
+		return r.UserAppId.UserId == userID && r.UserAppId.AppId == appID && r.InputId == inputID
+	})).Return(mockResp, nil)
+
+	req := mcp.JSONRPCRequest{
+		JSONRPC: "2.0",
+		ID:      reqID,
+		Method:  "resources/read",
+		Params:  mcp.RequestParams{URI: uri},
+	}
+
+	resp := handler.HandleRequest(req)
+
+	assert.NotNil(t, resp)
+	assert.Nil(t, resp.Error)
+	assert.NotNil(t, resp.Result)
+	resultMap, ok := resp.Result.(map[string]interface{})
+	assert.True(t, ok)
+	contents, ok := resultMap["contents"].([]map[string]interface{})
+	assert.True(t, ok)
+	assert.Len(t, contents, 1)
+	assert.Equal(t, uri, contents[0]["uri"])
+	assert.Equal(t, "application/json", contents[0]["mimeType"])
+	assert.Contains(t, contents[0]["text"].(string), `"id": "input-123"`)
+	assert.Contains(t, contents[0]["text"].(string), `"raw": "hello"`)
+	mockAPI.AssertExpectations(t)
+}
+
+func TestHandleReadResource_ListInputs_Success(t *testing.T) {
+	mockAPI := new(MockClarifaiAPIClient)
+	handler := setupTestHandler(mockAPI)
+	reqID := "req-list-inputs-1"
+	userID := "test-user"
+	appID := "test-app"
+	uri := fmt.Sprintf("clarifai://%s/%s/inputs", userID, appID)
+
+	mockInputs := []*pb.Input{
+		{Id: "input-1", Data: &pb.Data{Text: &pb.Text{Raw: "one"}}},
+		{Id: "input-2", Data: &pb.Data{Image: &pb.Image{Url: "two.jpg"}}},
+	}
+	mockResp := &pb.MultiInputResponse{ // Correct response type
+		Status: successStatus(), // Use helper
+		Inputs: mockInputs,
+	}
+
+	mockAPI.On("ListInputs", mock.Anything, mock.MatchedBy(func(r *pb.ListInputsRequest) bool {
+		return r.UserAppId.UserId == userID && r.UserAppId.AppId == appID && r.Page == 1 && r.PerPage == 20
+	})).Return(mockResp, nil)
+
+	req := mcp.JSONRPCRequest{
+		JSONRPC: "2.0",
+		ID:      reqID,
+		Method:  "resources/read", // or resources/list
+		Params:  mcp.RequestParams{URI: uri},
+	}
+
+	resp := handler.HandleRequest(req)
+
+	assert.NotNil(t, resp)
+	assert.Nil(t, resp.Error)
+	assert.NotNil(t, resp.Result)
+	resultMap, ok := resp.Result.(map[string]interface{})
+	assert.True(t, ok)
+	contents, ok := resultMap["contents"].([]map[string]interface{})
+	assert.True(t, ok)
+	assert.Len(t, contents, 2)
+	// Check first item
+	assert.Equal(t, fmt.Sprintf("clarifai://%s/%s/inputs/input-1", userID, appID), contents[0]["uri"])
+	assert.Equal(t, "input-1", contents[0]["name"])
+	assert.Contains(t, contents[0]["text"].(string), `"id": "input-1"`)
+	// Check second item
+	assert.Equal(t, fmt.Sprintf("clarifai://%s/%s/inputs/input-2", userID, appID), contents[1]["uri"])
+	assert.Equal(t, "input-2", contents[1]["name"])
+	assert.Contains(t, contents[1]["text"].(string), `"url": "two.jpg"`)
+
+	mockAPI.AssertExpectations(t)
+}
+
+// --- Tool Call Tests (Placeholder - Add more specific tests) ---
+
+func TestCallInferImage_Success_Bytes(t *testing.T) {
+	mockAPI := new(MockClarifaiAPIClient)
+	handler := setupTestHandler(mockAPI)
+	reqID := "req-infer-bytes-1"
+	modelID := "general-image-recognition"
+
+	mockResp := &pb.MultiOutputResponse{ // Correct response type
+		Status: successStatus(), // Use helper
+		Outputs: []*pb.Output{
+			{Data: &pb.Data{Concepts: []*pb.Concept{{Name: "cat", Value: 0.99}, {Name: "dog", Value: 0.01}}}},
+		},
+	}
+
+	mockAPI.On("PostModelOutputs", mock.Anything, mock.MatchedBy(func(r *pb.PostModelOutputsRequest) bool {
+		return r.ModelId == modelID && len(r.Inputs) == 1 && len(r.Inputs[0].Data.Image.Base64) > 0
+	})).Return(mockResp, nil)
+
+	req := mcp.JSONRPCRequest{
+		JSONRPC: "2.0",
+		ID:      reqID,
+		Method:  "tools/call",
+		Params: mcp.RequestParams{
+			Name: "infer_image",
+			Arguments: map[string]interface{}{
+				"image_bytes": "aGVsbG8=", // "hello" base64
+			},
+		},
+	}
+
+	resp := handler.HandleRequest(req)
+
+	assert.NotNil(t, resp)
+	assert.Nil(t, resp.Error)
+	assert.NotNil(t, resp.Result)
+	resultMap, ok := resp.Result.(map[string]interface{})
+	assert.True(t, ok)
+	content, ok := resultMap["content"].([]map[string]any)
+	assert.True(t, ok)
+	assert.Len(t, content, 1)
+	assert.Equal(t, "text", content[0]["type"])
+	assert.Contains(t, content[0]["text"].(string), "cat: 0.99")
+	assert.Contains(t, content[0]["text"].(string), "dog: 0.01")
+	mockAPI.AssertExpectations(t)
+}
+
+// TODO: Add more tests for:
+// - Get/List other resource types (models)
+// - Get/List with errors (Not Found, Auth Failed, etc.)
+// - List with pagination (nextCursor)
+// - List with search query
+// - callInferImage with URL input
+// - callGenerateImage success (bytes output)
+// - callGenerateImage success (file output)
+// - callTool with invalid arguments
+// - callTool with API errors

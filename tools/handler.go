@@ -628,6 +628,9 @@ func (h *Handler) performListResourceCall(request mcp.JSONRPCRequest, userID, ap
 }
 
 func (h *Handler) handleReadResource(request mcp.JSONRPCRequest) mcp.JSONRPCResponse {
+	// ADDED: Log entry into the function
+	// h.logger.Info("ENTERING handleReadResource", "id", request.ID, "uri", request.Params.URI, "method", request.Method)
+
 	h.logger.Debug("Handling resources/read request", "id", request.ID, "uri", request.Params.URI)
 
 	// --- Parameter Extraction & URI Validation ---
@@ -707,9 +710,13 @@ func (h *Handler) handleReadResource(request mcp.JSONRPCRequest) mcp.JSONRPCResp
 	// [app1, inputs, input123, annotations] -> ListAnnotationsForInput
 
 	resourceType := pathParts[1] // e.g., inputs, annotations, models
+	// ADDED: Log parsed details
+	h.logger.Debug("Parsed resource details", "userID", userID, "appID", appID, "resourceType", resourceType, "pathPartsCount", len(pathParts))
 
 	switch len(pathParts) {
 	case 2: // List operation (e.g., clarifai://user/app/annotations)
+		// ADDED: Log entering list operation block
+		h.logger.Info("Handling LIST operation within handleReadResource", "resourceType", resourceType)
 		queryParams := parsedURI.Query()
 		pageStr := queryParams.Get("page")
 		perPageStr := queryParams.Get("per_page")
@@ -776,6 +783,88 @@ func (h *Handler) handleReadResource(request mcp.JSONRPCRequest) mcp.JSONRPCResp
 					}
 				*/
 			}
+		case "inputs":
+			h.logger.Debug("Attempting to list inputs via resources/read", "user_id", userID, "app_id", appID, "page", page, "per_page", perPage, "query", query)
+			userAppIDSet := &pb.UserAppIDSet{UserId: userID, AppId: appID}
+			pagination := &pb.Pagination{Page: uint32(page), PerPage: uint32(perPage)}
+			if query != "" {
+				// PostInputsSearches
+				h.logger.Debug("Calling PostInputsSearches gRPC", "user_id", userID, "app_id", appID, "query", query, "page", page, "per_page", perPage)
+				searchQueryProto := &pb.Query{Ranks: []*pb.Rank{{Annotation: &pb.Annotation{Data: &pb.Data{Text: &pb.Text{Raw: query}}}}}}
+				grpcRequest := &pb.PostInputsSearchesRequest{UserAppId: userAppIDSet, Searches: []*pb.Search{{Query: searchQueryProto}}, Pagination: pagination}
+				resp, err := grpcClient.PostInputsSearches(callCtx, grpcRequest)
+				apiErr = err
+				if err == nil {
+					statusCode = resp.GetStatus().GetCode()
+					h.logger.Debug("PostInputsSearches gRPC call completed", "status_code", statusCode)
+					if statusCode == statuspb.StatusCode_SUCCESS {
+						resultContents = make([]map[string]interface{}, 0, len(resp.Hits))
+						for _, hit := range resp.Hits {
+							if hit.Input != nil {
+								// Map input to resource content
+								m := protojson.MarshalOptions{Indent: "  ", EmitUnpopulated: true}
+								inputJSON, marshalErr := m.Marshal(hit.Input)
+								if marshalErr != nil {
+									h.logger.Warn("Failed to marshal input from search hit", "id", hit.Input.Id, "error", marshalErr)
+									continue // Skip this input
+								}
+								resultContents = append(resultContents, map[string]interface{}{
+									"uri":      fmt.Sprintf("clarifai://%s/%s/inputs/%s", userID, appID, hit.Input.Id),
+									"mimeType": "application/json", // Representing the input metadata as JSON
+									"text":     string(inputJSON),
+									"name":     hit.Input.Id, // Use ID as name for list item
+								})
+							}
+						}
+						if uint32(len(resp.Hits)) == uint32(perPage) {
+							nextCursor = strconv.FormatUint(page+1, 10)
+						}
+						h.logger.Debug("Successfully processed PostInputsSearches response", "count", len(resultContents), "next_cursor", nextCursor)
+					} else {
+						apiErr = fmt.Errorf("API error: %s - %s", resp.GetStatus().GetDescription(), resp.GetStatus().GetDetails())
+						h.logger.Error("PostInputsSearches API error", "description", resp.GetStatus().GetDescription(), "details", resp.GetStatus().GetDetails())
+					}
+				} else {
+					h.logger.Error("PostInputsSearches gRPC call failed", "error", apiErr)
+				}
+			} else {
+				// ListInputs
+				h.logger.Debug("Calling ListInputs gRPC", "user_id", userID, "app_id", appID, "page", page, "per_page", perPage)
+				grpcRequest := &pb.ListInputsRequest{UserAppId: userAppIDSet, Page: uint32(page), PerPage: uint32(perPage)}
+				resp, err := grpcClient.ListInputs(callCtx, grpcRequest)
+				apiErr = err
+				if err == nil {
+					statusCode = resp.GetStatus().GetCode()
+					h.logger.Debug("ListInputs gRPC call completed", "status_code", statusCode)
+					if statusCode == statuspb.StatusCode_SUCCESS {
+						resultContents = make([]map[string]interface{}, 0, len(resp.Inputs))
+						for _, input := range resp.Inputs {
+							// Map input to resource content
+							m := protojson.MarshalOptions{Indent: "  ", EmitUnpopulated: true}
+							inputJSON, marshalErr := m.Marshal(input)
+							if marshalErr != nil {
+								h.logger.Warn("Failed to marshal input", "id", input.Id, "error", marshalErr)
+								continue // Skip this input
+							}
+							resultContents = append(resultContents, map[string]interface{}{
+								"uri":      fmt.Sprintf("clarifai://%s/%s/inputs/%s", userID, appID, input.Id),
+								"mimeType": "application/json", // Representing the input metadata as JSON
+								"text":     string(inputJSON),
+								"name":     input.Id, // Use ID as name for list item
+							})
+						}
+						if uint32(len(resp.Inputs)) == uint32(perPage) {
+							nextCursor = strconv.FormatUint(page+1, 10)
+						}
+						h.logger.Debug("Successfully processed ListInputs response", "count", len(resultContents), "next_cursor", nextCursor)
+					} else {
+						apiErr = fmt.Errorf("API error: %s - %s", resp.GetStatus().GetDescription(), resp.GetStatus().GetDetails())
+						h.logger.Error("ListInputs API error", "description", resp.GetStatus().GetDescription(), "details", resp.GetStatus().GetDetails())
+					}
+				} else {
+					h.logger.Error("ListInputs gRPC call failed", "error", apiErr)
+				}
+			}
 		case "models":
 			h.logger.Debug("Attempting to list models via resources/read", "user_id", userID, "app_id", appID, "page", page, "per_page", perPage, "query", query)
 			if query != "" {
@@ -825,6 +914,8 @@ func (h *Handler) handleReadResource(request mcp.JSONRPCRequest) mcp.JSONRPCResp
 			}
 		// Add other listable types here (e.g., datasets)
 		default:
+			// ADDED: Log falling into default case
+			h.logger.Error("LIST operation fell into DEFAULT case", "resourceType", resourceType)
 			apiErr = fmt.Errorf("listing resource type '%s' via resources/read is not supported or implemented", resourceType)
 			h.logger.Error("Unsupported resource type for list via resources/read", "resource_type", resourceType)
 		}

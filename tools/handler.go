@@ -1,14 +1,16 @@
 package tools
 
 import (
-	"context"
-	"encoding/json" // Added for marshalling input data in resource read
-	"fmt"           // Added for Sprintf
-	"log/slog"      // Use slog
-	"net/url"       // Added for URI parsing
-	"strconv"       // Added for pagination parsing
+	"context" // Added for marshalling input data in resource read
+	"fmt"     // Added for Sprintf
+
+	"log/slog" // Use slog
+	"net/url"  // Added for URI parsing
+	"strconv"  // Added for pagination parsing
 	"strings"
 	"time"
+
+	"google.golang.org/protobuf/encoding/protojson" // Added for marshalling model data
 
 	"clarifai-mcp-server-local/clarifai"
 	"clarifai-mcp-server-local/config"
@@ -101,6 +103,7 @@ var toolsDefinitionMap = map[string]interface{}{ // Renamed to avoid confusion
 			"required": []string{"text_prompt"},
 		},
 	},
+	// "list_models" tool removed - use resources/list with URI clarifai://{user_id}/{app_id}/models instead
 }
 
 // HandleRequest routes incoming MCP requests to the appropriate handler method.
@@ -123,7 +126,8 @@ func (h *Handler) HandleRequest(request mcp.JSONRPCRequest) *mcp.JSONRPCResponse
 	case "resources/templates/list":
 		response = h.handleListResourceTemplates(request)
 	case "resources/list":
-		response = h.handleListResources(request)
+		// response = h.handleListResources(request) // Deprecated in favor of read with list logic
+		response = h.handleReadResource(request) // Route list requests to read handler
 	case "resources/read":
 		response = h.handleReadResource(request)
 	default:
@@ -296,6 +300,8 @@ func (h *Handler) handleCallTool(request mcp.JSONRPCRequest) mcp.JSONRPCResponse
 		toolResult, toolError = h.callInferImage(request.Params.Arguments)
 	case "generate_image":
 		toolResult, toolError = h.callGenerateImage(request.Params.Arguments)
+	// case "list_models": // Removed - use resources/list
+	// 	toolResult, toolError = h.callListModels(request.Params.Arguments)
 	default:
 		toolError = &mcp.RPCError{Code: -32601, Message: "Tool not found: " + request.Params.Name}
 	}
@@ -417,207 +423,8 @@ func (h *Handler) handleListResourceTemplates(request mcp.JSONRPCRequest) mcp.JS
 	}
 }
 
-func (h *Handler) handleListResources(request mcp.JSONRPCRequest) mcp.JSONRPCResponse {
-	// This method is intentionally disabled to force clients to use specific resource URIs
-	// obtained from resources/templates/list. Listing resources without a specific URI
-	// (e.g., relying on default user/app) is no longer supported directly via this method.
-	h.logger.Debug("Handling resources/list request", "id", request.ID, "uri", request.Params.URI, "cursor", request.Params.Cursor)
-
-	var userID, appID, query string
-	var page, perPage uint32 = 1, 20 // Default pagination
-
-	// --- Parameter Extraction ---
-	if request.Params.URI == "" {
-		// No URI provided, try using default config
-		if h.config.DefaultUserID == "" || h.config.DefaultAppID == "" {
-			h.logger.Warn("resources/list called without URI and default user/app not configured.", "id", request.ID)
-			return mcp.JSONRPCResponse{
-				JSONRPC: "2.0", ID: request.ID,
-				Error: &mcp.RPCError{Code: -32602, Message: "Missing resource URI and default user/app not configured. Use resources/templates/list or provide a specific URI."},
-			}
-		}
-		userID = h.config.DefaultUserID
-		appID = h.config.DefaultAppID
-		h.logger.Debug("Using default user/app ID for resources/list", "user_id", userID, "app_id", appID)
-		// No query possible without URI
-	} else {
-		// Parse the provided URI
-		parsedURI, err := url.Parse(request.Params.URI)
-		if err != nil || parsedURI.Scheme != "clarifai" {
-			h.logger.Warn("Invalid URI format for resources/list", "uri", request.Params.URI, "error", err)
-			return mcp.JSONRPCResponse{
-				JSONRPC: "2.0", ID: request.ID,
-				Error: &mcp.RPCError{Code: -32602, Message: "Invalid URI format. Expected clarifai://{user_id}/{app_id}/inputs[?query=...]"},
-			}
-		}
-
-		// Expected path format: /{user_id}/{app_id}/inputs
-		pathParts := strings.Split(strings.TrimPrefix(parsedURI.Path, "/"), "/")
-		// Allow path ending only in /inputs for now
-		// TODO: Extend to support other listable resource types (models, datasets, etc.)
-		if len(pathParts) != 3 || pathParts[2] != "inputs" {
-			h.logger.Warn("Invalid URI path format for resources/list", "path", parsedURI.Path)
-			return mcp.JSONRPCResponse{
-				JSONRPC: "2.0", ID: request.ID,
-				Error: &mcp.RPCError{Code: -32602, Message: "Invalid URI path. Expected /{user_id}/{app_id}/inputs"},
-			}
-		}
-		userID = pathParts[0]
-		appID = pathParts[1]
-
-		// Extract query parameters
-		queryParams := parsedURI.Query()
-		query = queryParams.Get("query") // Get search query if present
-
-		// Handle pagination from query params OR cursor
-		if request.Params.Cursor != "" {
-			pageInt, err := strconv.Atoi(request.Params.Cursor)
-			if err == nil && pageInt > 0 {
-				page = uint32(pageInt)
-			} else {
-				h.logger.Warn("Invalid pagination cursor provided, using default", "cursor", request.Params.Cursor)
-			}
-		} else {
-			// Check query params if cursor not used
-			if pageStr := queryParams.Get("page"); pageStr != "" {
-				pageInt, err := strconv.Atoi(pageStr)
-				if err == nil && pageInt > 0 {
-					page = uint32(pageInt)
-				}
-			}
-			if perPageStr := queryParams.Get("per_page"); perPageStr != "" {
-				perPageInt, err := strconv.Atoi(perPageStr)
-				if err == nil && perPageInt > 0 {
-					// TODO: Add max per_page limit? (e.g., 1000)
-					if perPageInt > 1000 {
-						perPageInt = 1000
-					} // Example limit
-					perPage = uint32(perPageInt)
-				}
-			}
-		}
-	}
-
-	// --- gRPC Call ---
-	grpcClient := h.clarifaiClient.API
-	if grpcClient == nil {
-		return mcp.JSONRPCResponse{JSONRPC: "2.0", ID: request.ID, Error: &mcp.RPCError{Code: -32001, Message: "Clarifai client not initialized"}}
-	}
-	if h.pat == "" {
-		return mcp.JSONRPCResponse{JSONRPC: "2.0", ID: request.ID, Error: &mcp.RPCError{Code: -32001, Message: "Authentication failed: PAT not configured"}}
-	}
-
-	baseCtx := context.Background()
-	authCtx := clarifai.CreateContextWithAuth(baseCtx, h.pat)
-	callTimeout := time.Duration(h.timeoutSec) * time.Second
-	callCtx, cancel := context.WithTimeout(authCtx, callTimeout)
-	defer cancel()
-
-	var resources []map[string]interface{}
-	var nextCursor string
-	var apiErr error
-
-	userAppIDSet := &pb.UserAppIDSet{UserId: userID, AppId: appID}
-	pagination := &pb.Pagination{Page: page, PerPage: perPage}
-
-	if query != "" {
-		// --- Call PostInputsSearches ---
-		h.logger.Debug("Calling PostInputsSearches", "user_id", userID, "app_id", appID, "query", query, "page", page, "per_page", perPage)
-		// Construct search query (simple text search for now)
-		// TODO: Support more complex search queries if needed
-		// searchQueryStruct, _ := structpb.NewStruct(map[string]interface{}{"text": query}) // Basic text search - Unused
-		searchQuery := &pb.Query{
-			// Filters: []*pb.Filter{
-			// 	{Annotation: &pb.Annotation{Data: &pb.Data{Text: &pb.Text{Raw: query}}}},
-			// },
-			// Use Ranks for similarity search
-			Ranks: []*pb.Rank{
-				{Annotation: &pb.Annotation{Data: &pb.Data{Text: &pb.Text{Raw: query}}}},
-			},
-			// Example for searching by concept:
-			// Filters: []*pb.Filter{
-			// 	{Annotation: &pb.Annotation{Data: &pb.Data{Concepts: []*pb.Concept{{Name: query, Value: 1}}}}},
-			// },
-		}
-		grpcRequest := &pb.PostInputsSearchesRequest{
-			UserAppId:  userAppIDSet,
-			Searches:   []*pb.Search{{Query: searchQuery}},
-			Pagination: pagination,
-		}
-
-		resp, err := grpcClient.PostInputsSearches(callCtx, grpcRequest)
-		apiErr = err // Store potential gRPC error
-
-		if err == nil {
-			if resp.GetStatus().GetCode() != statuspb.StatusCode_SUCCESS {
-				h.logger.Error("gRPC PostInputsSearches non-success status", "status", resp.GetStatus())
-				return mcp.JSONRPCResponse{
-					JSONRPC: "2.0", ID: request.ID,
-					Error: &mcp.RPCError{Code: -32000, Message: resp.GetStatus().GetDescription(), Data: resp.GetStatus().GetDetails()},
-				}
-			}
-			// Process Hits
-			resources = make([]map[string]interface{}, 0, len(resp.Hits))
-			for _, hit := range resp.Hits {
-				if hit.Input != nil {
-					resources = append(resources, mapInputToResource(hit.Input, userID, appID))
-				}
-			}
-			// Determine next cursor if more results might exist
-			if uint32(len(resp.Hits)) == perPage {
-				nextCursor = strconv.Itoa(int(page + 1))
-			}
-		}
-
-	} else {
-		// --- Call ListInputs ---
-		h.logger.Debug("Calling ListInputs", "user_id", userID, "app_id", appID, "page", page, "per_page", perPage)
-		grpcRequest := &pb.ListInputsRequest{
-			UserAppId: userAppIDSet,
-			Page:      page,
-			PerPage:   perPage,
-		}
-
-		resp, err := grpcClient.ListInputs(callCtx, grpcRequest)
-		apiErr = err // Store potential gRPC error
-
-		if err == nil {
-			if resp.GetStatus().GetCode() != statuspb.StatusCode_SUCCESS {
-				h.logger.Error("gRPC ListInputs non-success status", "status", resp.GetStatus())
-				return mcp.JSONRPCResponse{
-					JSONRPC: "2.0", ID: request.ID,
-					Error: &mcp.RPCError{Code: -32000, Message: resp.GetStatus().GetDescription(), Data: resp.GetStatus().GetDetails()},
-				}
-			}
-			// Process Inputs
-			resources = make([]map[string]interface{}, 0, len(resp.Inputs))
-			for _, input := range resp.Inputs {
-				resources = append(resources, mapInputToResource(input, userID, appID))
-			}
-			// Determine next cursor if more results might exist
-			if uint32(len(resp.Inputs)) == perPage {
-				nextCursor = strconv.Itoa(int(page + 1))
-			}
-		}
-	}
-
-	// Handle gRPC errors from either call
-	if apiErr != nil {
-		h.logger.Error("gRPC error during resources/list", "error", apiErr)
-		return mcp.JSONRPCResponse{JSONRPC: "2.0", ID: request.ID, Error: clarifai.MapGRPCErrorToJSONRPC(apiErr)}
-	}
-
-	h.logger.Debug("Successfully listed resources", "count", len(resources), "next_cursor", nextCursor)
-
-	return mcp.JSONRPCResponse{
-		JSONRPC: "2.0",
-		ID:      request.ID,
-		Result: map[string]interface{}{
-			"resources":  resources,
-			"nextCursor": nextCursor,
-		},
-	}
-}
+// handleListResources is deprecated and functionality moved to handleReadResource
+// func (h *Handler) handleListResources(request mcp.JSONRPCRequest) mcp.JSONRPCResponse { ... }
 
 // Helper function to map a Clarifai Input to an MCP Resource map
 func mapInputToResource(input *pb.Input, userID, appID string) map[string]interface{} {
@@ -645,10 +452,185 @@ func mapInputToResource(input *pb.Input, userID, appID string) map[string]interf
 	return resource
 }
 
-func (h *Handler) handleReadResource(request mcp.JSONRPCRequest) mcp.JSONRPCResponse {
-	h.logger.Debug("Handling resources/read request", "id", request.ID, "uri", request.Params.URI) // Changed to Debug
+// Helper function to map a Clarifai Model to an MCP Resource map
+func mapModelToResource(model *pb.Model, userID, appID string) map[string]interface{} {
+	resource := map[string]interface{}{
+		"uri":         fmt.Sprintf("clarifai://%s/%s/models/%s", userID, appID, model.Id),
+		"name":        model.Name,         // Use model name if available, otherwise ID
+		"description": model.Notes,        // Use notes as description
+		"mimeType":    "application/json", // Models are represented as JSON
+	}
+	if resource["name"] == "" {
+		resource["name"] = model.Id // Fallback to ID if name is empty
+	}
+	// Add more details if needed, e.g., model type
+	// resource["modelTypeId"] = model.ModelTypeId
+	return resource
+}
 
-	// --- Parameter Extraction ---
+// --- Helper function to perform the actual gRPC list/search call ---
+// Takes parsed components and returns the MCP response
+func (h *Handler) performListResourceCall(request mcp.JSONRPCRequest, userID, appID, resourceType string, queryParams url.Values) mcp.JSONRPCResponse {
+	h.logger.Debug("Performing list resource call", "userID", userID, "appID", appID, "resourceType", resourceType, "queryParams", queryParams)
+
+	// --- Pagination & Query Extraction ---
+	var page, perPage uint32 = 1, 20  // Default pagination
+	query := queryParams.Get("query") // Get search query if present
+
+	// Handle pagination from query params OR cursor (Cursor takes precedence if provided in original request)
+	if request.Params.Cursor != "" {
+		pageInt, err := strconv.Atoi(request.Params.Cursor)
+		if err == nil && pageInt > 0 {
+			page = uint32(pageInt)
+		} else {
+			h.logger.Warn("Invalid pagination cursor provided, using default", "cursor", request.Params.Cursor)
+		}
+	} else {
+		// Check query params if cursor not used
+		if pageStr := queryParams.Get("page"); pageStr != "" {
+			pageInt, err := strconv.Atoi(pageStr)
+			if err == nil && pageInt > 0 {
+				page = uint32(pageInt)
+			}
+		}
+		if perPageStr := queryParams.Get("per_page"); perPageStr != "" {
+			perPageInt, err := strconv.Atoi(perPageStr)
+			if err == nil && perPageInt > 0 {
+				if perPageInt > 1000 {
+					perPageInt = 1000
+				} // Limit per_page
+				perPage = uint32(perPageInt)
+			}
+		}
+	}
+
+	// --- gRPC Setup ---
+	grpcClient := h.clarifaiClient.API
+	if grpcClient == nil {
+		return mcp.JSONRPCResponse{JSONRPC: "2.0", ID: request.ID, Error: &mcp.RPCError{Code: -32001, Message: "Clarifai client not initialized"}}
+	}
+	if h.pat == "" {
+		return mcp.JSONRPCResponse{JSONRPC: "2.0", ID: request.ID, Error: &mcp.RPCError{Code: -32001, Message: "Authentication failed: PAT not configured"}}
+	}
+
+	baseCtx := context.Background()
+	authCtx := clarifai.CreateContextWithAuth(baseCtx, h.pat)
+	callTimeout := time.Duration(h.timeoutSec) * time.Second
+	callCtx, cancel := context.WithTimeout(authCtx, callTimeout)
+	defer cancel()
+
+	var resources []map[string]interface{}
+	var nextCursor string
+	var apiErr error
+
+	userAppIDSet := &pb.UserAppIDSet{UserId: userID, AppId: appID}
+	pagination := &pb.Pagination{Page: page, PerPage: perPage}
+
+	// --- Perform gRPC Call based on resourceType ---
+	switch resourceType {
+	case "inputs":
+		if query != "" {
+			// PostInputsSearches
+			h.logger.Debug("Calling PostInputsSearches", "user_id", userID, "app_id", appID, "query", query, "page", page, "per_page", perPage)
+			searchQueryProto := &pb.Query{Ranks: []*pb.Rank{{Annotation: &pb.Annotation{Data: &pb.Data{Text: &pb.Text{Raw: query}}}}}}
+			grpcRequest := &pb.PostInputsSearchesRequest{UserAppId: userAppIDSet, Searches: []*pb.Search{{Query: searchQueryProto}}, Pagination: pagination}
+			resp, err := grpcClient.PostInputsSearches(callCtx, grpcRequest)
+			apiErr = err
+			if err == nil {
+				if resp.GetStatus().GetCode() != statuspb.StatusCode_SUCCESS {
+					apiErr = fmt.Errorf("API error: %s - %s", resp.GetStatus().GetDescription(), resp.GetStatus().GetDetails())
+				} else {
+					resources = make([]map[string]interface{}, 0, len(resp.Hits))
+					for _, hit := range resp.Hits {
+						if hit.Input != nil {
+							resources = append(resources, mapInputToResource(hit.Input, userID, appID))
+						}
+					}
+					if uint32(len(resp.Hits)) == perPage {
+						nextCursor = strconv.Itoa(int(page + 1))
+					}
+				}
+			}
+		} else {
+			// ListInputs
+			h.logger.Debug("Calling ListInputs", "user_id", userID, "app_id", appID, "page", page, "per_page", perPage)
+			grpcRequest := &pb.ListInputsRequest{UserAppId: userAppIDSet, Page: page, PerPage: perPage}
+			resp, err := grpcClient.ListInputs(callCtx, grpcRequest)
+			apiErr = err
+			if err == nil {
+				if resp.GetStatus().GetCode() != statuspb.StatusCode_SUCCESS {
+					apiErr = fmt.Errorf("API error: %s - %s", resp.GetStatus().GetDescription(), resp.GetStatus().GetDetails())
+				} else {
+					resources = make([]map[string]interface{}, 0, len(resp.Inputs))
+					for _, input := range resp.Inputs {
+						resources = append(resources, mapInputToResource(input, userID, appID))
+					}
+					if uint32(len(resp.Inputs)) == perPage {
+						nextCursor = strconv.Itoa(int(page + 1))
+					}
+				}
+			}
+		}
+	case "models":
+		if query != "" {
+			h.logger.Warn("Query parameter is not yet supported for listing models", "query", query)
+			// TODO: Implement PostModelSearches if needed
+			apiErr = fmt.Errorf("query parameter not supported for listing models")
+		} else {
+			// ListModels
+			h.logger.Debug("Calling ListModels", "user_id", userID, "app_id", appID, "page", page, "per_page", perPage)
+			grpcRequest := &pb.ListModelsRequest{UserAppId: userAppIDSet, Page: page, PerPage: perPage}
+			resp, err := grpcClient.ListModels(callCtx, grpcRequest)
+			apiErr = err
+			if err == nil {
+				if resp.GetStatus().GetCode() != statuspb.StatusCode_SUCCESS {
+					apiErr = fmt.Errorf("API error: %s - %s", resp.GetStatus().GetDescription(), resp.GetStatus().GetDetails())
+				} else {
+					resources = make([]map[string]interface{}, 0, len(resp.Models))
+					for _, model := range resp.Models {
+						resources = append(resources, mapModelToResource(model, userID, appID))
+					}
+					if uint32(len(resp.Models)) == perPage {
+						nextCursor = strconv.Itoa(int(page + 1))
+					}
+				}
+			}
+		}
+	// TODO: Add cases for other listable resource types (datasets, annotations, etc.)
+	default:
+		apiErr = fmt.Errorf("unsupported resource type for list: %s", resourceType)
+	}
+
+	// --- Handle Errors & Return Response ---
+	if apiErr != nil {
+		h.logger.Error("gRPC error during list resource call", "resource_type", resourceType, "error", apiErr)
+		// Check if it's a gRPC error or other error
+		grpcErr := clarifai.MapGRPCErrorToJSONRPC(apiErr)
+		if grpcErr != nil {
+			return mcp.JSONRPCResponse{JSONRPC: "2.0", ID: request.ID, Error: grpcErr}
+		}
+		// Generic internal error if not a gRPC error
+		return mcp.JSONRPCResponse{
+			JSONRPC: "2.0", ID: request.ID,
+			Error: &mcp.RPCError{Code: -32000, Message: fmt.Sprintf("Failed to list resources: %v", apiErr)},
+		}
+	}
+
+	h.logger.Debug("Successfully listed resources", "count", len(resources), "next_cursor", nextCursor)
+	return mcp.JSONRPCResponse{
+		JSONRPC: "2.0",
+		ID:      request.ID,
+		Result: map[string]interface{}{
+			"resources":  resources,
+			"nextCursor": nextCursor,
+		},
+	}
+}
+
+func (h *Handler) handleReadResource(request mcp.JSONRPCRequest) mcp.JSONRPCResponse {
+	h.logger.Debug("Handling resources/read request", "id", request.ID, "uri", request.Params.URI)
+
+	// --- Parameter Extraction & URI Validation ---
 	if request.Params.URI == "" {
 		return mcp.JSONRPCResponse{
 			JSONRPC: "2.0", ID: request.ID,
@@ -658,27 +640,44 @@ func (h *Handler) handleReadResource(request mcp.JSONRPCRequest) mcp.JSONRPCResp
 
 	parsedURI, err := url.Parse(request.Params.URI)
 	if err != nil || parsedURI.Scheme != "clarifai" {
-		h.logger.Warn("Invalid URI format for resources/read", "uri", request.Params.URI, "error", err)
+		h.logger.Warn("Invalid URI scheme for resources/read", "uri", request.Params.URI, "error", err)
 		return mcp.JSONRPCResponse{
 			JSONRPC: "2.0", ID: request.ID,
-			Error: &mcp.RPCError{Code: -32602, Message: "Invalid URI format. Expected clarifai://{user_id}/{app_id}/inputs/{input_id}"},
+			Error: &mcp.RPCError{Code: -32602, Message: "Invalid URI format. Expected clarifai://..."},
 		}
 	}
 
-	// Expected path format: /{user_id}/{app_id}/inputs/{input_id}
-	pathParts := strings.Split(strings.TrimPrefix(parsedURI.Path, "/"), "/")
-	if len(pathParts) != 4 || pathParts[2] != "inputs" || pathParts[3] == "" {
-		h.logger.Warn("Invalid URI path format for resources/read", "path", parsedURI.Path)
+	// --- Revised Path Parsing Logic ---
+	userID := parsedURI.Host // User ID is expected in the host part
+	if userID == "" {
+		h.logger.Warn("Invalid URI format for resources/read: Missing user_id (host part)", "uri", request.Params.URI)
 		return mcp.JSONRPCResponse{
 			JSONRPC: "2.0", ID: request.ID,
-			Error: &mcp.RPCError{Code: -32602, Message: "Invalid URI path. Expected /{user_id}/{app_id}/inputs/{input_id}"},
+			Error: &mcp.RPCError{Code: -32602, Message: "Invalid URI format: Missing user_id. Expected clarifai://{user_id}/{app_id}/..."},
 		}
 	}
-	userID := pathParts[0]
-	appID := pathParts[1]
-	inputID := pathParts[3]
 
-	// --- gRPC Call ---
+	trimmedPath := strings.TrimPrefix(parsedURI.Path, "/")
+	pathParts := strings.Split(trimmedPath, "/") // Split the path part (e.g., "app_id/resource_type/resource_id")
+
+	if len(pathParts) < 2 {
+		h.logger.Warn("Invalid URI path format for resources/read (too few path parts)", "path", parsedURI.Path, "parts", len(pathParts))
+		return mcp.JSONRPCResponse{
+			JSONRPC: "2.0", ID: request.ID,
+			Error: &mcp.RPCError{Code: -32602, Message: fmt.Sprintf("Invalid URI path format for resources/read. Expected at least clarifai://{user_id}/{app_id}/{resource_type}, got %d parts", len(pathParts))},
+		}
+	}
+
+	appID := pathParts[0]
+	if appID == "" {
+		h.logger.Warn("Invalid URI format for resources/read: Missing app_id", "uri", request.Params.URI)
+		return mcp.JSONRPCResponse{
+			JSONRPC: "2.0", ID: request.ID,
+			Error: &mcp.RPCError{Code: -32602, Message: "Invalid URI format: Missing app_id. Expected clarifai://{user_id}/{app_id}/..."},
+		}
+	}
+
+	// --- gRPC Setup --- (Common for all operations)
 	grpcClient := h.clarifaiClient.API
 	if grpcClient == nil {
 		return mcp.JSONRPCResponse{JSONRPC: "2.0", ID: request.ID, Error: &mcp.RPCError{Code: -32001, Message: "Clarifai client not initialized"}}
@@ -687,75 +686,356 @@ func (h *Handler) handleReadResource(request mcp.JSONRPCRequest) mcp.JSONRPCResp
 		return mcp.JSONRPCResponse{JSONRPC: "2.0", ID: request.ID, Error: &mcp.RPCError{Code: -32001, Message: "Authentication failed: PAT not configured"}}
 	}
 
-	h.logger.Debug("Calling GetInput", "user_id", userID, "app_id", appID, "input_id", inputID) // Changed to Debug
-
-	grpcRequest := &pb.GetInputRequest{
-		UserAppId: &pb.UserAppIDSet{UserId: userID, AppId: appID},
-		InputId:   inputID,
-	}
-
 	baseCtx := context.Background()
 	authCtx := clarifai.CreateContextWithAuth(baseCtx, h.pat)
 	callTimeout := time.Duration(h.timeoutSec) * time.Second
 	callCtx, cancel := context.WithTimeout(authCtx, callTimeout)
 	defer cancel()
 
-	resp, err := grpcClient.GetInput(callCtx, grpcRequest)
+	var resourceJSON []byte
+	var apiErr error
+	var statusCode statuspb.StatusCode = statuspb.StatusCode_ZERO // Default to zero
+	var resultContents []map[string]interface{}                   // To hold multiple results for list operations
+	var nextCursor string                                         // For pagination in list operations
 
-	if err != nil {
-		h.logger.Error("gRPC GetInput error", "error", err)
-		return mcp.JSONRPCResponse{JSONRPC: "2.0", ID: request.ID, Error: clarifai.MapGRPCErrorToJSONRPC(err)}
+	// --- Determine Action based on Path Parts ---
+	// pathParts: [app_id, resource_type, [resource_id], [sub_resource_type]]
+	// Examples:
+	// [app1, inputs, input123] -> GetInput
+	// [app1, annotations] -> ListAnnotations
+	// [app1, annotations, anno456] -> GetAnnotation
+	// [app1, inputs, input123, annotations] -> ListAnnotationsForInput
+
+	resourceType := pathParts[1] // e.g., inputs, annotations, models
+
+	switch len(pathParts) {
+	case 2: // List operation (e.g., clarifai://user/app/annotations)
+		queryParams := parsedURI.Query()
+		pageStr := queryParams.Get("page")
+		perPageStr := queryParams.Get("per_page")
+		query := queryParams.Get("query") // For search
+
+		page, _ := strconv.ParseUint(pageStr, 10, 32)
+		if page == 0 {
+			page = 1
+		}
+		perPage, _ := strconv.ParseUint(perPageStr, 10, 32)
+		if perPage == 0 {
+			perPage = 20 // Default per page
+		}
+		if perPage > 1000 {
+			perPage = 1000 // Max per page
+		}
+
+		// userAppIDSet := &pb.UserAppIDSet{UserId: userID, AppId: appID} // Commented out as it's unused due to placeholder below
+		// pagination := &pb.Pagination{Page: uint32(page), PerPage: uint32(perPage)} // Removed unused variable
+
+		switch resourceType {
+		case "annotations":
+			if query != "" {
+				h.logger.Debug("Calling PostAnnotationsSearches", "user_id", userID, "app_id", appID, "page", page, "per_page", perPage, "query", query)
+				// TODO: Implement PostAnnotationsSearches gRPC call
+				// searchQueryProto := &pb.Query{ ... } // Construct query proto based on search_term
+				// grpcRequest := &pb.PostAnnotationsSearchesRequest{UserAppId: userAppIDSet, Searches: []*pb.Search{{Query: searchQueryProto}}, Pagination: pagination}
+				// resp, err := grpcClient.PostAnnotationsSearches(callCtx, grpcRequest)
+				// apiErr = err
+				// if err == nil { ... process resp.Hits ... }
+				apiErr = fmt.Errorf("PostAnnotationsSearches (search with query) not yet implemented") // Placeholder
+			} else {
+				h.logger.Debug("Calling ListAnnotations", "user_id", userID, "app_id", appID, "page", page, "per_page", perPage)
+				// TODO: Implement ListAnnotations gRPC call
+				// grpcRequest := &pb.ListAnnotationsRequest{UserAppId: userAppIDSet, Page: uint32(page), PerPage: uint32(perPage)}
+				// resp, err := grpcClient.ListAnnotations(callCtx, grpcRequest)
+				// apiErr = err
+				// if err == nil {
+				// 	statusCode = resp.GetStatus().GetCode()
+				apiErr = fmt.Errorf("ListAnnotations not yet implemented") // Placeholder
+				/*
+						if statusCode == statuspb.StatusCode_SUCCESS {
+							resultContents = make([]map[string]interface{}, 0, len(resp.Annotations))
+							for _, anno := range resp.Annotations {
+								// Map annotation to resource content
+								m := protojson.MarshalOptions{Indent: "  ", EmitUnpopulated: true}
+								annoJSON, marshalErr := m.Marshal(anno)
+								if marshalErr != nil {
+									h.logger.Warn("Failed to marshal annotation", "id", anno.Id, "error", marshalErr)
+									continue // Skip this annotation
+								}
+								resultContents = append(resultContents, map[string]interface{}{
+									"uri":      fmt.Sprintf("clarifai://%s/%s/annotations/%s", userID, appID, anno.Id),
+									"mimeType": "application/json",
+									"text":     string(annoJSON),
+								})
+							}
+							if uint32(len(resp.Annotations)) == uint32(perPage) {
+								nextCursor = strconv.FormatUint(page+1, 10)
+							}
+						} else {
+							apiErr = fmt.Errorf("API error: %s - %s", resp.GetStatus().GetDescription(), resp.GetStatus().GetDetails())
+						}
+					}
+				*/
+			}
+		case "models":
+			h.logger.Debug("Attempting to list models via resources/read", "user_id", userID, "app_id", appID, "page", page, "per_page", perPage, "query", query)
+			if query != "" {
+				h.logger.Warn("Query parameter is not yet supported for listing models via resources/read", "query", query)
+				apiErr = fmt.Errorf("query parameter not supported for listing models")
+			} else {
+				// ListModels
+				h.logger.Debug("Calling ListModels gRPC", "user_id", userID, "app_id", appID, "page", page, "per_page", perPage)
+				userAppIDSet := &pb.UserAppIDSet{UserId: userID, AppId: appID}
+				// pagination := &pb.Pagination{Page: uint32(page), PerPage: uint32(perPage)} // Removed unused variable
+				grpcRequest := &pb.ListModelsRequest{UserAppId: userAppIDSet, Page: uint32(page), PerPage: uint32(perPage)} // Use correct page/perPage types
+				resp, err := grpcClient.ListModels(callCtx, grpcRequest)
+				apiErr = err
+				if err == nil {
+					statusCode = resp.GetStatus().GetCode()
+					h.logger.Debug("ListModels gRPC call completed", "status_code", statusCode)
+					if statusCode == statuspb.StatusCode_SUCCESS {
+						resultContents = make([]map[string]interface{}, 0, len(resp.Models))
+						for _, model := range resp.Models {
+							// Map model to resource content
+							m := protojson.MarshalOptions{Indent: "  ", EmitUnpopulated: true}
+							modelJSON, marshalErr := m.Marshal(model)
+							if marshalErr != nil {
+								h.logger.Warn("Failed to marshal model", "id", model.Id, "error", marshalErr)
+								continue // Skip this model
+							}
+							resultContents = append(resultContents, map[string]interface{}{
+								"uri":      fmt.Sprintf("clarifai://%s/%s/models/%s", userID, appID, model.Id),
+								"mimeType": "application/json",
+								"text":     string(modelJSON),
+								// Optionally add name/description directly to the list item
+								"name":        model.Name,
+								"description": model.Notes,
+							})
+						}
+						if uint32(len(resp.Models)) == uint32(perPage) {
+							nextCursor = strconv.FormatUint(page+1, 10)
+						}
+						h.logger.Debug("Successfully processed ListModels response", "count", len(resultContents), "next_cursor", nextCursor)
+					} else {
+						apiErr = fmt.Errorf("API error: %s - %s", resp.GetStatus().GetDescription(), resp.GetStatus().GetDetails())
+						h.logger.Error("ListModels API error", "description", resp.GetStatus().GetDescription(), "details", resp.GetStatus().GetDetails())
+					}
+				} else {
+					h.logger.Error("ListModels gRPC call failed", "error", apiErr)
+				}
+			}
+		// Add other listable types here (e.g., datasets)
+		default:
+			apiErr = fmt.Errorf("listing resource type '%s' via resources/read is not supported or implemented", resourceType)
+			h.logger.Error("Unsupported resource type for list via resources/read", "resource_type", resourceType)
+		}
+
+	case 3: // Get specific resource (e.g., clarifai://user/app/inputs/input123)
+		resourceID := pathParts[2]
+		if resourceID == "" || resourceID == "*" {
+			apiErr = fmt.Errorf("invalid URI for specific resource read: resource ID cannot be empty or '*'")
+			break // Exit switch
+		}
+		userAppIDSet := &pb.UserAppIDSet{UserId: userID, AppId: appID}
+
+		switch resourceType {
+		case "inputs":
+			h.logger.Debug("Calling GetInput", "user_id", userID, "app_id", appID, "input_id", resourceID)
+			grpcRequest := &pb.GetInputRequest{UserAppId: userAppIDSet, InputId: resourceID}
+			resp, err := grpcClient.GetInput(callCtx, grpcRequest)
+			apiErr = err
+			if err == nil {
+				statusCode = resp.GetStatus().GetCode()
+				if statusCode == statuspb.StatusCode_SUCCESS && resp.Input != nil {
+					m := protojson.MarshalOptions{Indent: "  ", EmitUnpopulated: true}
+					resourceJSON, apiErr = m.Marshal(resp.Input)
+				} else if statusCode != statuspb.StatusCode_SUCCESS {
+					apiErr = fmt.Errorf("API error: %s - %s", resp.GetStatus().GetDescription(), resp.GetStatus().GetDetails())
+				} else {
+					apiErr = fmt.Errorf("API response did not contain input data")
+				}
+			}
+		case "models":
+			h.logger.Debug("Calling GetModel", "user_id", userID, "app_id", appID, "model_id", resourceID)
+			grpcRequest := &pb.GetModelRequest{UserAppId: userAppIDSet, ModelId: resourceID}
+			resp, err := h.clarifaiClient.API.GetModel(callCtx, grpcRequest)
+			apiErr = err
+			if err == nil {
+				statusCode = resp.GetStatus().GetCode()
+				if statusCode == statuspb.StatusCode_SUCCESS && resp.Model != nil {
+					m := protojson.MarshalOptions{Indent: "  ", EmitUnpopulated: true}
+					resourceJSON, apiErr = m.Marshal(resp.Model)
+				} else if statusCode != statuspb.StatusCode_SUCCESS {
+					apiErr = fmt.Errorf("API error: %s - %s", resp.GetStatus().GetDescription(), resp.GetStatus().GetDetails())
+				} else {
+					apiErr = fmt.Errorf("API response did not contain model data")
+				}
+			}
+		case "annotations":
+			h.logger.Debug("Calling GetAnnotation", "user_id", userID, "app_id", appID, "annotation_id", resourceID)
+			// TODO: Implement GetAnnotation gRPC call
+			// grpcRequest := &pb.GetAnnotationRequest{UserAppId: userAppIDSet, AnnotationId: resourceID}
+			// resp, err := grpcClient.GetAnnotation(callCtx, grpcRequest)
+			// apiErr = err
+			// if err == nil {
+			// 	statusCode = resp.GetStatus().GetCode()
+			apiErr = fmt.Errorf("GetAnnotation not yet implemented") // Placeholder
+			/*
+					if statusCode == statuspb.StatusCode_SUCCESS && resp.Annotation != nil {
+						m := protojson.MarshalOptions{Indent: "  ", EmitUnpopulated: true}
+						resourceJSON, apiErr = m.Marshal(resp.Annotation)
+					} else if statusCode != statuspb.StatusCode_SUCCESS {
+						apiErr = fmt.Errorf("API error: %s - %s", resp.GetStatus().GetDescription(), resp.GetStatus().GetDetails())
+					} else {
+						apiErr = fmt.Errorf("API response did not contain annotation data")
+					}
+				}
+			*/
+		// Add other gettable types here (e.g., datasets)
+		default:
+			apiErr = fmt.Errorf("reading specific resource type '%s' is not supported or implemented", resourceType)
+		}
+
+	case 4: // List sub-resource (e.g., clarifai://user/app/inputs/input123/annotations)
+		parentResourceType := pathParts[1]
+		parentResourceID := pathParts[2]
+		subResourceType := pathParts[3]
+
+		if parentResourceID == "" || parentResourceID == "*" {
+			apiErr = fmt.Errorf("invalid URI for sub-resource list: parent resource ID cannot be empty or '*'")
+			break // Exit switch
+		}
+
+		queryParams := parsedURI.Query()
+		pageStr := queryParams.Get("page")
+		perPageStr := queryParams.Get("per_page")
+
+		page, _ := strconv.ParseUint(pageStr, 10, 32)
+		if page == 0 {
+			page = 1
+		}
+		perPage, _ := strconv.ParseUint(perPageStr, 10, 32)
+		if perPage == 0 {
+			perPage = 20 // Default per page
+		}
+		if perPage > 1000 {
+			perPage = 1000 // Max per page
+		}
+
+		// userAppIDSet := &pb.UserAppIDSet{UserId: userID, AppId: appID} // Commented out as it's unused due to placeholder below
+		// pagination := &pb.Pagination{Page: uint32(page), PerPage: uint32(perPage)} // Already defined above
+
+		switch parentResourceType {
+		case "inputs":
+			if subResourceType == "annotations" {
+				h.logger.Debug("Calling ListAnnotations for Input", "user_id", userID, "app_id", appID, "input_id", parentResourceID, "page", page, "per_page", perPage)
+				// TODO: Implement ListAnnotations gRPC call with input_id filter
+				// grpcRequest := &pb.ListAnnotationsRequest{UserAppId: userAppIDSet, InputIds: []string{parentResourceID}, Page: uint32(page), PerPage: uint32(perPage)}
+				// resp, err := grpcClient.ListAnnotations(callCtx, grpcRequest)
+				// apiErr = err
+				// if err == nil {
+				// 	statusCode = resp.GetStatus().GetCode()
+				apiErr = fmt.Errorf("ListAnnotations for Input not yet implemented") // Placeholder
+				/*
+						if statusCode == statuspb.StatusCode_SUCCESS {
+							resultContents = make([]map[string]interface{}, 0, len(resp.Annotations))
+							for _, anno := range resp.Annotations {
+								// Map annotation to resource content
+								m := protojson.MarshalOptions{Indent: "  ", EmitUnpopulated: true}
+								annoJSON, marshalErr := m.Marshal(anno)
+								if marshalErr != nil {
+									h.logger.Warn("Failed to marshal annotation", "id", anno.Id, "error", marshalErr)
+									continue // Skip this annotation
+								}
+								resultContents = append(resultContents, map[string]interface{}{
+									"uri":      fmt.Sprintf("clarifai://%s/%s/annotations/%s", userID, appID, anno.Id), // URI of the annotation itself
+									"mimeType": "application/json",
+									"text":     string(annoJSON),
+								})
+							}
+							if uint32(len(resp.Annotations)) == uint32(perPage) {
+								nextCursor = strconv.FormatUint(page+1, 10)
+							}
+						} else {
+							apiErr = fmt.Errorf("API error: %s - %s", resp.GetStatus().GetDescription(), resp.GetStatus().GetDetails())
+						}
+					}
+				*/
+			} else {
+				apiErr = fmt.Errorf("unsupported sub-resource type '%s' for parent '%s'", subResourceType, parentResourceType)
+			}
+		// Add other parent types if needed (e.g., models/{model_id}/versions)
+		default:
+			apiErr = fmt.Errorf("listing sub-resources for parent type '%s' is not supported or implemented", parentResourceType)
+		}
+
+	default:
+		h.logger.Warn("Invalid URI path format for resources/read", "path", parsedURI.Path, "parts", len(pathParts))
+		apiErr = fmt.Errorf("invalid URI format for resources/read. Unexpected number of path segments: %d", len(pathParts))
 	}
-	if resp.GetStatus().GetCode() != statuspb.StatusCode_SUCCESS {
-		h.logger.Error("gRPC GetInput non-success status", "status", resp.GetStatus())
-		// Specific check for Not Found
-		if resp.GetStatus().GetCode() == statuspb.StatusCode_INPUT_DOES_NOT_EXIST {
+
+	// --- Handle Errors & Return Response ---
+	if apiErr != nil {
+		h.logger.Error("Error during resources/read", "uri", request.Params.URI, "error", apiErr)
+		// Specific Not Found check
+		if statusCode == statuspb.StatusCode_INPUT_DOES_NOT_EXIST ||
+			statusCode == statuspb.StatusCode_MODEL_DOES_NOT_EXIST { // Removed ANNOTATION_DOES_NOT_EXIST as it's not defined
+			// TODO: Add specific status codes for other resource types (e.g., annotations) when implemented
 			return mcp.JSONRPCResponse{
 				JSONRPC: "2.0", ID: request.ID,
-				Error: &mcp.RPCError{Code: -32002, Message: "Resource not found", Data: request.Params.URI}, // Use MCP Not Found code
+				Error: &mcp.RPCError{Code: -32002, Message: "Resource not found", Data: request.Params.URI},
 			}
 		}
-		return mcp.JSONRPCResponse{
-			JSONRPC: "2.0", ID: request.ID,
-			Error: &mcp.RPCError{Code: -32000, Message: resp.GetStatus().GetDescription(), Data: resp.GetStatus().GetDetails()},
+		// Map gRPC errors
+		grpcErr := clarifai.MapGRPCErrorToJSONRPC(apiErr)
+		if grpcErr != nil {
+			return mcp.JSONRPCResponse{JSONRPC: "2.0", ID: request.ID, Error: grpcErr}
 		}
-	}
-	if resp.Input == nil {
-		h.logger.Error("gRPC GetInput response missing input data")
+		// Generic internal error
 		return mcp.JSONRPCResponse{
 			JSONRPC: "2.0", ID: request.ID,
-			Error: &mcp.RPCError{Code: -32000, Message: "API response did not contain input data"},
-		}
-	}
-
-	// --- Process Result ---
-	// Marshal the Input object to JSON string
-	inputJSON, err := json.MarshalIndent(resp.Input, "", "  ") // Use MarshalIndent for readability
-	if err != nil {
-		h.logger.Error("Failed to marshal input data to JSON", "error", err)
-		return mcp.JSONRPCResponse{
-			JSONRPC: "2.0", ID: request.ID,
-			Error: &mcp.RPCError{Code: -32000, Message: "Failed to process resource data"},
+			Error: &mcp.RPCError{Code: -32000, Message: fmt.Sprintf("Failed to read resource: %v", apiErr)},
 		}
 	}
 
-	h.logger.Debug("Successfully read resource", "uri", request.Params.URI) // Changed to Debug
-
-	// Determine mimeType (consistent with listResources)
+	// --- Construct Success Response ---
 	mimeType := "application/json" // We are returning JSON
 
+	// Handle single resource vs list results
+	if resourceJSON != nil { // Single resource was read
+		resultContents = []map[string]interface{}{
+			{
+				"uri":      request.Params.URI,
+				"mimeType": mimeType,
+				"text":     string(resourceJSON),
+			},
+		}
+	} else if len(resultContents) > 0 { // List operation was performed
+		// resultContents was populated by the list logic above
+		h.logger.Debug("Successfully listed resources via read", "uri", request.Params.URI, "count", len(resultContents), "next_cursor", nextCursor)
+	} else if len(pathParts) == 2 || len(pathParts) == 4 { // List operation returned empty results
+		h.logger.Debug("List operation via read returned no results", "uri", request.Params.URI)
+		resultContents = []map[string]interface{}{} // Return empty list explicitly
+	} else {
+		// Should not happen if apiErr is nil for a Get operation, but handle defensively
+		h.logger.Error("No error but also no content generated for resources/read Get operation", "uri", request.Params.URI)
+		return mcp.JSONRPCResponse{
+			JSONRPC: "2.0", ID: request.ID,
+			Error: &mcp.RPCError{Code: -32000, Message: "Internal error: Failed to generate content for resource read"},
+		}
+	}
+
+	responseResult := map[string]interface{}{
+		"contents": resultContents,
+	}
+	if nextCursor != "" {
+		responseResult["nextCursor"] = nextCursor
+	}
+
+	h.logger.Debug("Successfully processed resources/read request", "uri", request.Params.URI)
 	return mcp.JSONRPCResponse{
 		JSONRPC: "2.0",
 		ID:      request.ID,
-		Result: map[string]interface{}{
-			"contents": []map[string]interface{}{
-				{
-					"uri":      request.Params.URI,
-					"mimeType": mimeType,
-					"text":     string(inputJSON),
-				},
-			},
-		},
+		Result:  responseResult,
 	}
 }
 
@@ -878,6 +1158,9 @@ func (h *Handler) callInferImage(args map[string]interface{}) (interface{}, *mcp
 	}
 	return toolResult, nil
 }
+
+// --- Tool Implementation for list_models (REMOVED) ---
+// func (h *Handler) callListModels(args map[string]interface{}) (interface{}, *mcp.RPCError) { ... }
 
 func (h *Handler) callGenerateImage(args map[string]interface{}) (interface{}, *mcp.RPCError) {
 	h.logger.Debug("Executing callGenerateImage tool") // Use slog

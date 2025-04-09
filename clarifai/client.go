@@ -21,6 +21,11 @@ type V2ClientInterface interface {
 	PostInputsSearches(ctx context.Context, in *pb.PostInputsSearchesRequest, opts ...grpc.CallOption) (*pb.MultiSearchResponse, error)
 	GetInput(ctx context.Context, in *pb.GetInputRequest, opts ...grpc.CallOption) (*pb.SingleInputResponse, error)
 	ListInputs(ctx context.Context, in *pb.ListInputsRequest, opts ...grpc.CallOption) (*pb.MultiInputResponse, error)
+	ListModels(ctx context.Context, in *pb.ListModelsRequest, opts ...grpc.CallOption) (*pb.MultiModelResponse, error) // Added ListModels
+	GetModel(ctx context.Context, in *pb.GetModelRequest, opts ...grpc.CallOption) (*pb.SingleModelResponse, error)   // Added GetModel
+	// Annotation methods used in handler
+	ListAnnotations(ctx context.Context, in *pb.ListAnnotationsRequest, opts ...grpc.CallOption) (*pb.MultiAnnotationResponse, error)
+	GetAnnotation(ctx context.Context, in *pb.GetAnnotationRequest, opts ...grpc.CallOption) (*pb.SingleAnnotationResponse, error)
 	// Add other methods here if they become needed by the server
 }
 

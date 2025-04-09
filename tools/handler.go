@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"encoding/json" // Import standard JSON package
 	"fmt"
 	"log/slog"
 	"net/url"
@@ -21,7 +22,45 @@ import (
 
 	pb "github.com/Clarifai/clarifai-go-grpc/proto/clarifai/api"
 	statuspb "github.com/Clarifai/clarifai-go-grpc/proto/clarifai/api/status"
+	timestamppb "google.golang.org/protobuf/types/known/timestamppb" // Needed for FilteredModelInfo
 )
+
+// FilteredModelInfo defines the subset of fields to return for list operations.
+type FilteredModelInfo struct {
+	ID           string                    `json:"id"`
+	Name         string                    `json:"name"`
+	CreatedAt    *timestamppb.Timestamp    `json:"createdAt"`
+	AppID        string                    `json:"appId"`
+	UserID       string                    `json:"userId"`
+	ModelTypeID  string                    `json:"modelTypeId"`
+	Description  string                    `json:"description,omitempty"`
+	Visibility   *pb.Visibility            `json:"visibility,omitempty"`
+	ModelVersion *FilteredModelVersionInfo `json:"modelVersion,omitempty"`
+	DisplayName  string                    `json:"displayName,omitempty"`
+	Task         string                    `json:"task,omitempty"`
+	Toolkits     []string                  `json:"toolkits,omitempty"`
+	UseCases     []string                  `json:"useCases,omitempty"`
+	IsStarred    bool                      `json:"isStarred"`
+	StarCount    int32                     `json:"starCount"` // Corrected type
+	Image        *pb.Image                 `json:"image,omitempty"`
+}
+
+// FilteredModelVersionInfo defines the subset of model version fields.
+type FilteredModelVersionInfo struct {
+	ID                 string                 `json:"id"`
+	CreatedAt          *timestamppb.Timestamp `json:"createdAt"`
+	Status             *statuspb.Status       `json:"status,omitempty"`
+	ActiveConceptCount uint32                 `json:"activeConceptCount"`
+	Metrics            *pb.MetricsSummary     `json:"metricsSummary,omitempty"` // Use MetricsSummary
+	Description        string                 `json:"description,omitempty"`
+	Visibility         *pb.Visibility         `json:"visibility,omitempty"`
+	AppID              string                 `json:"appId"`
+	UserID             string                 `json:"userId"`
+	License            string                 `json:"license,omitempty"`
+	OutputInfo         *pb.OutputInfo         `json:"outputInfo,omitempty"` // Keep output info
+	InputInfo          *pb.InputInfo          `json:"inputInfo,omitempty"`  // Keep input info
+	// TrainInfo is intentionally omitted
+}
 
 type Handler struct {
 	clarifaiClient *clarifai.Client
@@ -460,44 +499,94 @@ func (h *Handler) handleListResource(request mcp.JSONRPCRequest, userID, appID, 
 	}
 
 	resultContents := make([]map[string]interface{}, 0, len(results))
-	m := protojson.MarshalOptions{Indent: "  ", EmitUnpopulated: true}
+	// Use standard JSON marshaller for potentially filtered structs
+	jsonMarshaller := json.MarshalIndent
 
 	for _, item := range results {
-		itemJSON, marshalErr := m.Marshal(item)
-		if marshalErr != nil {
-			h.logger.Warn("Failed to marshal list item", "error", marshalErr)
-			continue
-		}
-
 		var itemID, itemName, itemDesc string
 		var itemURI string
+		var marshaledJSON []byte // Will hold the JSON for the response
+		var marshalErr error
 
 		switch v := item.(type) {
 		case *pb.Input:
 			itemID = v.Id
 			itemName = v.Id
 			itemURI = fmt.Sprintf("clarifai://%s/%s/inputs/%s", userID, appID, itemID)
+			// Use protojson for full protobuf message
+			m := protojson.MarshalOptions{Indent: "  ", EmitUnpopulated: true}
+			marshaledJSON, marshalErr = m.Marshal(v)
 		case *pb.Model:
 			itemID = v.Id
 			itemName = v.Name
 			if itemName == "" {
 				itemName = itemID
 			}
-			itemDesc = v.Notes
+			itemDesc = v.Description // Use model description directly
 			itemURI = fmt.Sprintf("clarifai://%s/%s/models/%s", userID, appID, itemID)
+
+			// Create and populate the filtered struct
+			filteredModel := FilteredModelInfo{
+				ID:          v.Id,
+				Name:        v.Name,
+				CreatedAt:   v.CreatedAt,
+				AppID:       v.AppId,
+				UserID:      v.UserId,
+				ModelTypeID: v.ModelTypeId,
+				Description: v.Description,
+				Visibility:  v.Visibility,
+				DisplayName: v.DisplayName,
+				Task:        v.Task,
+				Toolkits:    v.Toolkits,
+				UseCases:    v.UseCases,
+				IsStarred:   v.IsStarred,
+				StarCount:   v.StarCount, // Corrected type
+				Image:       v.Image,
+			}
+			if v.ModelVersion != nil {
+				filteredModel.ModelVersion = &FilteredModelVersionInfo{
+					ID:                 v.ModelVersion.Id,
+					CreatedAt:          v.ModelVersion.CreatedAt,
+					Status:             v.ModelVersion.Status,
+					ActiveConceptCount: v.ModelVersion.ActiveConceptCount,
+					// Assign Summary from Metrics if Metrics is not nil
+					Metrics:            nil,
+					Description:        v.ModelVersion.Description,
+					Visibility:         v.ModelVersion.Visibility,
+					AppID:              v.ModelVersion.AppId,
+					UserID:             v.ModelVersion.UserId,
+					License:            v.ModelVersion.License,
+					OutputInfo:         v.ModelVersion.OutputInfo,
+					InputInfo:          v.ModelVersion.InputInfo,
+				}
+				// Safely access Summary
+				if v.ModelVersion.Metrics != nil {
+					filteredModel.ModelVersion.Metrics = v.ModelVersion.Metrics.Summary
+				}
+			}
+			// Marshal the filtered struct using standard JSON
+			marshaledJSON, marshalErr = jsonMarshaller(&filteredModel, "", "  ")
 		case *pb.Annotation:
 			itemID = v.Id
 			itemName = v.Id
 			itemURI = fmt.Sprintf("clarifai://%s/%s/annotations/%s", userID, appID, itemID)
+			// Use protojson for full protobuf message
+			m := protojson.MarshalOptions{Indent: "  ", EmitUnpopulated: true}
+			marshaledJSON, marshalErr = m.Marshal(v)
 		default:
 			h.logger.Warn("Unsupported type in list results", "type", fmt.Sprintf("%T", item))
 			continue
 		}
 
+		if marshalErr != nil {
+			h.logger.Warn("Failed to marshal list item", "id", itemID, "error", marshalErr)
+			continue // Skip this item if marshalling fails
+		}
+
 		resultContents = append(resultContents, map[string]interface{}{
 			"uri":         itemURI,
 			"mimeType":    "application/json",
-			"text":        string(itemJSON),
+			"text":        string(marshaledJSON), // Use potentially filtered JSON
 			"name":        itemName,
 			"description": itemDesc,
 		})

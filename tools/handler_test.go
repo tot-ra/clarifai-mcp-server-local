@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -20,6 +21,8 @@ import (
 	"google.golang.org/grpc" // Import grpc package
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/types/known/structpb" // Import structpb
+	timestamppb "google.golang.org/protobuf/types/known/timestamppb"
 )
 
 // Mock Clarifai Client
@@ -29,11 +32,6 @@ type MockClarifaiAPIClient struct {
 
 // Implement V2ClientInterface for MockClarifaiAPIClient
 func (m *MockClarifaiAPIClient) GetInput(ctx context.Context, req *pb.GetInputRequest, opts ...grpc.CallOption) (*pb.SingleInputResponse, error) {
-	// Convert opts to []interface{} for mock.Called
-	mockOpts := make([]interface{}, len(opts))
-	for i, opt := range opts {
-		mockOpts[i] = opt
-	}
 	args := m.Called(ctx, req) // Do not pass mockOpts explicitly
 	if args.Get(0) == nil {
 		return nil, args.Error(1)
@@ -42,10 +40,6 @@ func (m *MockClarifaiAPIClient) GetInput(ctx context.Context, req *pb.GetInputRe
 }
 
 func (m *MockClarifaiAPIClient) ListInputs(ctx context.Context, req *pb.ListInputsRequest, opts ...grpc.CallOption) (*pb.MultiInputResponse, error) {
-	mockOpts := make([]interface{}, len(opts))
-	for i, opt := range opts {
-		mockOpts[i] = opt
-	}
 	args := m.Called(ctx, req) // Do not pass mockOpts explicitly
 	if args.Get(0) == nil {
 		return nil, args.Error(1)
@@ -54,10 +48,6 @@ func (m *MockClarifaiAPIClient) ListInputs(ctx context.Context, req *pb.ListInpu
 }
 
 func (m *MockClarifaiAPIClient) PostInputsSearches(ctx context.Context, req *pb.PostInputsSearchesRequest, opts ...grpc.CallOption) (*pb.MultiSearchResponse, error) {
-	mockOpts := make([]interface{}, len(opts))
-	for i, opt := range opts {
-		mockOpts[i] = opt
-	}
 	args := m.Called(ctx, req) // Do not pass mockOpts explicitly
 	if args.Get(0) == nil {
 		return nil, args.Error(1)
@@ -66,10 +56,6 @@ func (m *MockClarifaiAPIClient) PostInputsSearches(ctx context.Context, req *pb.
 }
 
 func (m *MockClarifaiAPIClient) GetModel(ctx context.Context, req *pb.GetModelRequest, opts ...grpc.CallOption) (*pb.SingleModelResponse, error) {
-	mockOpts := make([]interface{}, len(opts))
-	for i, opt := range opts {
-		mockOpts[i] = opt
-	}
 	args := m.Called(ctx, req) // Do not pass mockOpts explicitly
 	if args.Get(0) == nil {
 		return nil, args.Error(1)
@@ -78,10 +64,6 @@ func (m *MockClarifaiAPIClient) GetModel(ctx context.Context, req *pb.GetModelRe
 }
 
 func (m *MockClarifaiAPIClient) ListModels(ctx context.Context, req *pb.ListModelsRequest, opts ...grpc.CallOption) (*pb.MultiModelResponse, error) {
-	mockOpts := make([]interface{}, len(opts))
-	for i, opt := range opts {
-		mockOpts[i] = opt
-	}
 	args := m.Called(ctx, req) // Do not pass mockOpts explicitly
 	if args.Get(0) == nil {
 		return nil, args.Error(1)
@@ -90,10 +72,6 @@ func (m *MockClarifaiAPIClient) ListModels(ctx context.Context, req *pb.ListMode
 }
 
 func (m *MockClarifaiAPIClient) PostModelOutputs(ctx context.Context, req *pb.PostModelOutputsRequest, opts ...grpc.CallOption) (*pb.MultiOutputResponse, error) {
-	mockOpts := make([]interface{}, len(opts))
-	for i, opt := range opts {
-		mockOpts[i] = opt
-	}
 	args := m.Called(ctx, req) // Do not pass mockOpts explicitly
 	if args.Get(0) == nil {
 		return nil, args.Error(1)
@@ -103,10 +81,6 @@ func (m *MockClarifaiAPIClient) PostModelOutputs(ctx context.Context, req *pb.Po
 
 // Add missing methods to satisfy the interface
 func (m *MockClarifaiAPIClient) ListAnnotations(ctx context.Context, req *pb.ListAnnotationsRequest, opts ...grpc.CallOption) (*pb.MultiAnnotationResponse, error) {
-	mockOpts := make([]interface{}, len(opts))
-	for i, opt := range opts {
-		mockOpts[i] = opt
-	}
 	args := m.Called(ctx, req) // Do not pass mockOpts explicitly
 	if args.Get(0) == nil {
 		return nil, args.Error(1)
@@ -115,10 +89,6 @@ func (m *MockClarifaiAPIClient) ListAnnotations(ctx context.Context, req *pb.Lis
 }
 
 func (m *MockClarifaiAPIClient) GetAnnotation(ctx context.Context, req *pb.GetAnnotationRequest, opts ...grpc.CallOption) (*pb.SingleAnnotationResponse, error) {
-	mockOpts := make([]interface{}, len(opts))
-	for i, opt := range opts {
-		mockOpts[i] = opt
-	}
 	args := m.Called(ctx, req) // Do not pass mockOpts explicitly
 	if args.Get(0) == nil {
 		return nil, args.Error(1)
@@ -425,8 +395,90 @@ func TestCallInferImage_Success_Bytes(t *testing.T) {
 	mockAPI.AssertExpectations(t)
 }
 
+func TestHandleListResource_ListModels_Filtered(t *testing.T) {
+	mockAPI := new(MockClarifaiAPIClient)
+	handler := setupTestHandler(mockAPI)
+	reqID := "req-list-models-filtered-1"
+	userID := "test-user"
+	appID := "test-app"
+	uri := fmt.Sprintf("clarifai://%s/%s/models", userID, appID)
+
+	// Mock model with fields that should be filtered
+	mockModel := &pb.Model{
+		Id:          "model-123",
+		Name:        "Test Model",
+		CreatedAt:   timestamppb.Now(),
+		AppId:       appID,
+		UserId:      userID,
+		ModelTypeId: "visual-classifier",
+		Description: "A test model.",
+		Notes:       "These notes should be filtered out.", // Should be filtered
+		Metadata: func() *structpb.Struct { // Use structpb.Struct
+			s, _ := structpb.NewStruct(map[string]interface{}{"key": "value"})
+			return s
+		}(), // Should be filtered
+		ModelVersion: &pb.ModelVersion{
+			Id:        "version-abc",
+			CreatedAt: timestamppb.Now(),
+			Status:    successStatus(),
+			// Correctly initialize TrainInfo.Params as *structpb.Struct
+			TrainInfo: &pb.TrainInfo{Params: &structpb.Struct{Fields: map[string]*structpb.Value{
+				"epoch": structpb.NewStringValue("10"),
+			}}}, // Should be filtered
+			Metrics: &pb.EvalMetrics{Summary: &pb.MetricsSummary{Top1Accuracy: 0.95}},
+		},
+	}
+	mockResp := &pb.MultiModelResponse{
+		Status: successStatus(),
+		Models: []*pb.Model{mockModel},
+	}
+
+	mockAPI.On("ListModels", mock.Anything, mock.MatchedBy(func(r *pb.ListModelsRequest) bool {
+		return r.UserAppId.UserId == userID && r.UserAppId.AppId == appID && r.Page == 1 && r.PerPage == 20
+	})).Return(mockResp, nil)
+
+	req := mcp.JSONRPCRequest{
+		JSONRPC: "2.0",
+		ID:      reqID,
+		Method:  "resources/read", // Using read for list
+		Params:  mcp.RequestParams{URI: uri},
+	}
+
+	resp := handler.HandleRequest(req)
+
+	assert.NotNil(t, resp)
+	assert.Nil(t, resp.Error)
+	assert.NotNil(t, resp.Result)
+	resultMap, ok := resp.Result.(map[string]interface{})
+	assert.True(t, ok)
+	contents, ok := resultMap["contents"].([]map[string]interface{})
+	assert.True(t, ok)
+	assert.Len(t, contents, 1)
+
+	// Check the raw JSON string for excluded fields
+	rawJSON := contents[0]["text"].(string)
+	assert.NotContains(t, rawJSON, `"notes":`)
+	assert.NotContains(t, rawJSON, `"metadata":`)
+	assert.NotContains(t, rawJSON, `"trainInfo":`)
+	assert.Contains(t, rawJSON, `"metricsSummary":`) // Ensure MetricsSummary is present
+	assert.Contains(t, rawJSON, `"id": "model-123"`)
+	assert.Contains(t, rawJSON, `"description": "A test model."`)
+
+	// Optionally, unmarshal into the filtered struct to verify fields
+	var filteredResult FilteredModelInfo
+	err := json.Unmarshal([]byte(rawJSON), &filteredResult)
+	assert.NoError(t, err)
+	assert.Equal(t, "model-123", filteredResult.ID)
+	assert.Equal(t, "A test model.", filteredResult.Description)
+	assert.NotNil(t, filteredResult.ModelVersion)
+	assert.NotNil(t, filteredResult.ModelVersion.Metrics) // Check MetricsSummary presence
+	assert.Equal(t, float32(0.95), filteredResult.ModelVersion.Metrics.Top1Accuracy)
+
+	mockAPI.AssertExpectations(t)
+}
+
 // TODO: Add more tests for:
-// - Get/List other resource types (models)
+// - Get/List other resource types (models) - More cases
 // - Get/List with errors (Not Found, Auth Failed, etc.)
 // - List with pagination (nextCursor)
 // - List with search query

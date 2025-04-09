@@ -38,7 +38,7 @@ go mod tidy
 Use the `go build` command, targeting the main package within the `cmd/server` directory. Specify the output path and target architecture if needed (example for macOS ARM):
 ```bash
 # For macOS ARM
-GOOS=darwin GOARCH=arm64 go build -o ./mcp_binary ./...
+make build
 
 # For Linux AMD64
 # GOOS=linux GOARCH=amd64 go build -o ./mcp_binary ./...

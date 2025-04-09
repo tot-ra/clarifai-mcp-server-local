@@ -4,7 +4,7 @@ import (
 	"context"
 	"log/slog" // Use slog
 
-	"clarifai-mcp-server-local/internal/mcp" // For RPCError type
+	"clarifai-mcp-server-local/mcp" // For RPCError type
 
 	pb "github.com/Clarifai/clarifai-go-grpc/proto/clarifai/api"
 	"google.golang.org/grpc"
@@ -18,6 +18,9 @@ import (
 // This makes mocking easier for testing.
 type V2ClientInterface interface {
 	PostModelOutputs(ctx context.Context, in *pb.PostModelOutputsRequest, opts ...grpc.CallOption) (*pb.MultiOutputResponse, error)
+	PostInputsSearches(ctx context.Context, in *pb.PostInputsSearchesRequest, opts ...grpc.CallOption) (*pb.MultiSearchResponse, error)
+	GetInput(ctx context.Context, in *pb.GetInputRequest, opts ...grpc.CallOption) (*pb.SingleInputResponse, error)
+	ListInputs(ctx context.Context, in *pb.ListInputsRequest, opts ...grpc.CallOption) (*pb.MultiInputResponse, error)
 	// Add other methods here if they become needed by the server
 }
 
@@ -51,7 +54,7 @@ func NewClient(apiAddress string) (*Client, error) {
 		slog.Error("Failed to connect to gRPC server", "address", apiAddress, "error", err) // Use slog
 		return nil, err                                                                     // Return error
 	}
-	slog.Info("gRPC connection established", "address", apiAddress) // Use slog
+	// slog.Info("gRPC connection established", "address", apiAddress) // Use slog // Commented out to reduce startup noise
 	apiClient := pb.NewV2Client(conn) // This is the real client implementing the full interface
 
 	// The real apiClient implicitly satisfies the smaller V2ClientInterface

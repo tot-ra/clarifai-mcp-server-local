@@ -9,7 +9,6 @@ require (
 
 require (
 	github.com/golang/protobuf v1.5.4 // indirect
-	go.uber.org/mock v0.5.1 // indirect
 	golang.org/x/net v0.34.0 // indirect
 	golang.org/x/sys v0.29.0 // indirect
 	golang.org/x/text v0.21.0 // indirect

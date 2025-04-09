@@ -20,6 +20,10 @@ type RequestParams struct {
 	Name      string                 `json:"name,omitempty"`
 	Arguments map[string]interface{} `json:"arguments,omitempty"`
 
+	// resources/list, resources/read, resources/subscribe params
+	URI    string `json:"uri,omitempty"`
+	Cursor string `json:"cursor,omitempty"`
+
 	// Deprecated/Removed (kept for reference during refactor, remove later)
 	// PAT             string                 `json:"pat,omitempty"`
 	// ImageBytes      string                 `json:"image_bytes,omitempty"`

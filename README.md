@@ -38,13 +38,13 @@ go mod tidy
 Use the `go build` command, targeting the main package within the `cmd/server` directory. Specify the output path and target architecture if needed (example for macOS ARM):
 ```bash
 # For macOS ARM
-GOOS=darwin GOARCH=arm64 go build -o ./mcp_binary ./cmd/server/...
+GOOS=darwin GOARCH=arm64 go build -o ./mcp_binary ./...
 
 # For Linux AMD64
-# GOOS=linux GOARCH=amd64 go build -o ./mcp_binary ./cmd/server/...
+# GOOS=linux GOARCH=amd64 go build -o ./mcp_binary ./...
 
 # For Windows AMD64
-# GOOS=windows GOARCH=amd64 go build -o ./mcp_binary.exe ./cmd/server/...
+# GOOS=windows GOARCH=amd64 go build -o ./mcp_binary.exe ./...
 ```
 
 This will create an executable file named `mcp_binary` (or `mcp_binary.exe` on Windows) in the project's root directory.
@@ -59,7 +59,10 @@ Example MCP settings entry (`cline_mcp_settings.json`), for example for Cline:
       "command": "~/clarifai-mcp-server-local/mcp_binary",
       "args": [
         "--pat", "YOUR_CLARIFAI_PAT",
-        "--output-path", "~/Desktop/",
+        "--output-path", "~/Desktop/", // Optional: Where to save large images
+        // Optional flags for default resource listing:
+        // "--default-user-id", "your_user_id",
+        // "--default-app-id", "your_app_id",
       ],
     }
   }
@@ -78,6 +81,61 @@ cd clarifai-mcp-server-local
 go test -v -count=1 ./...
 ```
 
+## Features
+
+The server currently exposes the following MCP capabilities:
+
+### Tools
+
+*   **`generate_image`**: Generates an image based on a text prompt using a specified or default Clarifai text-to-image model.
+    *   Input: `text_prompt` (required), `model_id`, `user_id`, `app_id` (optional).
+    *   Output: Base64 encoded image data (for small images) or a file path (for large images saved to the configured `--output-path`).
+*   **`infer_image`**: Performs inference on an image using a specified or default Clarifai model.
+    *   Input: `image_bytes` or `image_url` (required), `model_id`, `user_id`, `app_id` (optional).
+    *   Output: Text description of inference results (e.g., concepts detected).
+
+### Resources (Read-Only)
+
+The server exposes various Clarifai entities as **read-only** MCP resources, allowing clients to list, search, and read data using standard MCP methods (`resources/list`, `resources/read`). Actions like creating, updating, or deleting entities are handled via MCP **Tools**.
+
+*   **Resource URI Scheme:** Resources follow a consistent URI structure:
+    `clarifai://{user_id}/{app_id}/{resource_type}[/{resource_id}][?query_params]`
+    Nested resources like model versions or dataset versions follow patterns like:
+    `clarifai://{user_id}/{app_id}/models/{model_id}/versions[/{version_id}]`
+    `clarifai://{user_id}/{app_id}/datasets/{dataset_id}/versions[/{version_id}]`
+    `clarifai://{user_id}/{app_id}/inputs/{input_id}/annotations`
+
+*   **Supported Resource Templates (`resources/templates/list`):** The server provides templates for discovering available resources:
+    *   **Inputs:** List, Search, Get
+        *   `clarifai://{user_id}/{app_id}/inputs`
+        *   `clarifai://{user_id}/{app_id}/inputs?query={search_term}`
+        *   `clarifai://{user_id}/{app_id}/inputs/{input_id}`
+    *   **Annotations:** List, Search, Get, List by Input
+        *   `clarifai://{user_id}/{app_id}/annotations`
+        *   `clarifai://{user_id}/{app_id}/annotations?query={search_term}`
+        *   `clarifai://{user_id}/{app_id}/annotations/{annotation_id}`
+        *   `clarifai://{user_id}/{app_id}/inputs/{input_id}/annotations`
+    *   **Models:** List, Search, Get
+        *   `clarifai://{user_id}/{app_id}/models`
+        *   `clarifai://{user_id}/{app_id}/models?query={search_term}`
+        *   `clarifai://{user_id}/{app_id}/models/{model_id}`
+    *   **Model Versions:** List, Get
+        *   `clarifai://{user_id}/{app_id}/models/{model_id}/versions`
+        *   `clarifai://{user_id}/{app_id}/models/{model_id}/versions/{version_id}`
+    *   **Datasets:** List, Get
+        *   `clarifai://{user_id}/{app_id}/datasets`
+        *   `clarifai://{user_id}/{app_id}/datasets/{dataset_id}`
+    *   **Dataset Versions:** List (Reading specific versions not yet implemented)
+        *   `clarifai://{user_id}/{app_id}/datasets/{dataset_id}/versions`
+
+*   **Listing (`resources/list`):**
+    *   Use a template URI (e.g., `clarifai://.../inputs`) to list resources of that type. Supports pagination via the `cursor` parameter (representing the page number).
+    *   Use a search template URI (e.g., `clarifai://.../inputs?query=cats`) to search resources.
+    *   If called without a URI, it defaults to listing inputs in the context defined by `--default-user-id` and `--default-app-id` flags (if set).
+
+*   **Reading (`resources/read`):**
+    *   Use a specific resource URI (e.g., `clarifai://.../models/{model_id}`) to retrieve the full details of the corresponding Clarifai object (Input, Model, Annotation, etc.).
+    *   The result is returned as a JSON string in the `text` field of the resource content.
 
 ## Architecture Overview
 

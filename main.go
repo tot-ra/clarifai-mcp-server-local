@@ -6,13 +6,13 @@ import (
 	"log/slog"  // Import slog
 	"math/rand" // Added for filename generation
 	"os"        // Needed for joining paths
-	"time"      // Added for filename generation
+	"time" // Added for filename generation
 
-	"clarifai-mcp-server-local/internal/clarifai" // Import the new clarifai package
-	"clarifai-mcp-server-local/internal/config"   // Import the new config package
-	"clarifai-mcp-server-local/internal/mcp"      // Import the new mcp package
-	"clarifai-mcp-server-local/internal/tools"    // Import the new tools package
-	// "clarifai-mcp-server-local/internal/utils" // No longer needed directly here
+	"clarifai-mcp-server-local/clarifai" // Import the new clarifai package
+	"clarifai-mcp-server-local/config"   // Import the new config package
+	"clarifai-mcp-server-local/mcp"      // Import the new mcp package
+	"clarifai-mcp-server-local/tools"    // Import the new tools package
+	// "clarifai-mcp-server-local/utils" // No longer needed directly here
 	// gRPC related imports (Some might be removed if no longer directly used here)
 	// "google.golang.org/grpc" // No longer needed directly here
 	// "google.golang.org/grpc/codes" // No longer needed directly here
@@ -115,10 +115,10 @@ func main() {
 		}
 	}() // Ensure connection is closed on exit
 
-	slog.Info("Starting Clarifai MCP Server Bridge on stdio...") // Use slog
+	// slog.Info("Starting Clarifai MCP Server Bridge on stdio...") // Use slog // Commented out to reduce startup noise
 
-	// Create the tools handler, passing dependencies
-	toolHandler := tools.NewHandler(clarifaiClient, cfg.Pat, cfg.OutputPath, cfg.TimeoutSec)
+	// Create the tools handler, passing dependencies (including config)
+	toolHandler := tools.NewHandler(clarifaiClient, cfg)
 
 	// No longer initializing global auth state here.
 	// The patFlag is passed directly to the handler goroutine.

@@ -1,0 +1,3 @@
+Building for darwin/arm64...
+GOOS=darwin GOARCH=arm64 go build -o ./mcp_binary .
+Build successful! Binary created at ./mcp_binary

@@ -4,7 +4,7 @@ import (
 	"errors"
 	"testing"
 
-	"clarifai-mcp-server-local/internal/mcp" // For RPCError type
+	"clarifai-mcp-server-local/mcp" // For RPCError type
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"

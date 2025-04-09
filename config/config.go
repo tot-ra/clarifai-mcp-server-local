@@ -14,9 +14,11 @@ type Config struct {
 	Pat         string     // Clarifai Personal Access Token
 	OutputPath  string     // Directory to save large generated images
 	GrpcAddr    string     // Clarifai gRPC API address
-	LogLevel    slog.Level // Use slog.Level type
-	TimeoutSec  int        // gRPC call timeout in seconds
-	logLevelStr string     // Temporary storage for the flag string
+	LogLevel      slog.Level // Use slog.Level type
+	TimeoutSec    int        // gRPC call timeout in seconds
+	DefaultUserID string     // Optional: Default User ID for listing resources
+	DefaultAppID  string     // Optional: Default App ID for listing resources
+	logLevelStr   string     // Temporary storage for the flag string
 }
 
 // ErrPatMissing indicates the required PAT flag was not provided.
@@ -37,6 +39,8 @@ func LoadConfig() (*Config, error) {
 	fs.StringVar(&cfg.GrpcAddr, "grpc-addr", "api.clarifai.com:443", "Clarifai gRPC API address")
 	fs.StringVar(&cfg.logLevelStr, "log-level", "INFO", "Logging level (DEBUG, INFO, WARN, ERROR)") // Store flag in temp string
 	fs.IntVar(&cfg.TimeoutSec, "timeout", 120, "gRPC call timeout in seconds")
+	fs.StringVar(&cfg.DefaultUserID, "default-user-id", "", "Default User ID for listing resources without a specific URI (optional)")
+	fs.StringVar(&cfg.DefaultAppID, "default-app-id", "", "Default App ID for listing resources without a specific URI (optional)")
 
 	// Parse the flags from os.Args[1:]
 	err := fs.Parse(os.Args[1:])

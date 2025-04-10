@@ -2,17 +2,56 @@ package clarifai
 
 import (
 	"context"
-	"log/slog" // Use slog
+	"errors" // Added for errors.As
+	"fmt"    // Added for custom error formatting
+	"log/slog"
 
 	"clarifai-mcp-server-local/mcp" // For RPCError type
 
 	pb "github.com/Clarifai/clarifai-go-grpc/proto/clarifai/api"
+	statuspb "github.com/Clarifai/clarifai-go-grpc/proto/clarifai/api/status" // Added for status codes
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/codes" // Added for gRPC codes
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 )
+
+// APIStatusError represents an error derived from a non-SUCCESS Clarifai API status code.
+type APIStatusError struct {
+	StatusCode codes.Code
+	Message    string
+	Details    string
+	ReqId      string // Added ReqId
+}
+
+func (e *APIStatusError) Error() string {
+	// Include ReqId in the error string for better logging
+	return fmt.Sprintf("API error (%s): %s - %s (ReqId: %s)", e.StatusCode.String(), e.Message, e.Details, e.ReqId)
+}
+
+// NewAPIStatusError creates a new APIStatusError from a statuspb.Status.
+func NewAPIStatusError(st *statuspb.Status) *APIStatusError {
+	// Always map non-SUCCESS statuspb codes to a generic gRPC code.
+	// This avoids issues with potentially undefined statuspb constants.
+	// We use codes.Internal as a general indicator of an API-level failure.
+	grpcCode := codes.Internal
+	if st.Code == statuspb.StatusCode_SUCCESS {
+		// This case should ideally not happen when creating an error,
+		// but handle it defensively.
+		grpcCode = codes.OK
+		slog.Warn("Creating APIStatusError from SUCCESS statuspb.Status", "code", st.Code, "description", st.Description)
+	} else {
+		slog.Debug("Mapping non-SUCCESS statuspb.Status to gRPC Internal", "statuspb_code", st.Code, "description", st.Description)
+	}
+
+	return &APIStatusError{
+		StatusCode: grpcCode,
+		Message:    st.Description, // Use the description from the status
+		Details:    st.Details,     // Include details if available
+		ReqId:      st.ReqId,       // Capture ReqId
+	}
+}
 
 // V2ClientInterface defines the subset of pb.V2Client methods used by this server.
 // This makes mocking easier for testing.
@@ -22,7 +61,7 @@ type V2ClientInterface interface {
 	GetInput(ctx context.Context, in *pb.GetInputRequest, opts ...grpc.CallOption) (*pb.SingleInputResponse, error)
 	ListInputs(ctx context.Context, in *pb.ListInputsRequest, opts ...grpc.CallOption) (*pb.MultiInputResponse, error)
 	ListModels(ctx context.Context, in *pb.ListModelsRequest, opts ...grpc.CallOption) (*pb.MultiModelResponse, error) // Added ListModels
-	GetModel(ctx context.Context, in *pb.GetModelRequest, opts ...grpc.CallOption) (*pb.SingleModelResponse, error)   // Added GetModel
+	GetModel(ctx context.Context, in *pb.GetModelRequest, opts ...grpc.CallOption) (*pb.SingleModelResponse, error)    // Added GetModel
 	// Annotation methods used in handler
 	ListAnnotations(ctx context.Context, in *pb.ListAnnotationsRequest, opts ...grpc.CallOption) (*pb.MultiAnnotationResponse, error)
 	GetAnnotation(ctx context.Context, in *pb.GetAnnotationRequest, opts ...grpc.CallOption) (*pb.SingleAnnotationResponse, error)
@@ -89,32 +128,35 @@ func MapGRPCErrorToJSONRPC(err error) *mcp.RPCError {
 	if err == nil {
 		return nil
 	}
+
+	// Check for our custom APIStatusError first
+	var apiStatusErr *APIStatusError
+	if errors.As(err, &apiStatusErr) {
+		slog.Debug("Mapping APIStatusError", "grpc_code", apiStatusErr.StatusCode, "message", apiStatusErr.Message, "req_id", apiStatusErr.ReqId)
+		// Use the mapped gRPC code from the custom error
+		// Include ReqId and Details in the Data field
+		errorData := map[string]interface{}{
+			"details": apiStatusErr.Details,
+			"req_id":  apiStatusErr.ReqId,
+		}
+		return &mcp.RPCError{Code: int(apiStatusErr.StatusCode), Message: apiStatusErr.Message, Data: errorData}
+	}
+
+	// Check for standard gRPC status error
 	s, ok := status.FromError(err)
 	if !ok {
-		// Not a gRPC status error, return a generic internal error
-		slog.Warn("Non-gRPC error encountered during mapping", "error", err) // Use slog
+		// Not a gRPC status error or our custom error, return a generic internal error
+		slog.Warn("Non-gRPC/APIStatus error encountered during mapping", "error", err)
 		return &mcp.RPCError{Code: -32000, Message: "Internal server error: " + err.Error()}
 	}
 
-	slog.Debug("Mapping gRPC error", "grpc_code", s.Code(), "grpc_message", s.Message()) // Use slog
-
-	var code int
-	// Map gRPC status codes to JSON-RPC error codes (adjust mapping as needed)
-	switch s.Code() {
-	case codes.Unauthenticated:
-		code = -32001 // Custom code for Authentication Failed
-	case codes.InvalidArgument:
-		code = -32602 // Standard JSON-RPC Invalid Params
-	case codes.NotFound:
-		code = -32002 // Custom code for Not Found
-	case codes.PermissionDenied:
-		code = -32003 // Custom code for Permission Denied
-	case codes.Unavailable:
-		code = -32004 // Custom code for Service Unavailable
-	case codes.DeadlineExceeded:
-		code = -32005 // Custom code for Timeout
-	default:
-		code = -32000 // Generic Internal Error for other gRPC errors
+	slog.Debug("Mapping direct gRPC error", "grpc_code", s.Code(), "grpc_message", s.Message())
+	// Use the original gRPC code directly from the status error
+	code := int(s.Code())
+	// Include the original gRPC message in the data field for more context
+	errorData := map[string]interface{}{
+		"grpc_message": s.Message(),
+		"original_error": err.Error(), // Include the original error string
 	}
-	return &mcp.RPCError{Code: code, Message: s.Message()} // Use the gRPC message
+	return &mcp.RPCError{Code: code, Message: s.Message(), Data: errorData}
 }

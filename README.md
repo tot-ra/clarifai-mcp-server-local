@@ -89,8 +89,11 @@ The server currently exposes the following MCP capabilities:
 *   **`generate_image`**: Generates an image based on a text prompt using a specified or default Clarifai text-to-image model.
     *   Input: `text_prompt` (required), `model_id`, `user_id`, `app_id` (optional).
     *   Output: Base64 encoded image data (for small images) or a file path (for large images saved to the configured `--output-path`).
-*   **`infer_image`**: Performs inference on an image using a specified or default Clarifai model.
-    *   Input: `image_bytes` or `image_url` (required), `model_id`, `user_id`, `app_id` (optional).
+*   **`clarifai_image_by_path`**: Performs inference on a local image file using a specified or default Clarifai model.
+    *   Input: `filepath` (required, path to the local image), `model_id`, `user_id`, `app_id` (optional).
+    *   Output: Text description of inference results (e.g., concepts detected).
+*   **`clarifai_image_by_url`**: Performs inference on an image URL using a specified or default Clarifai model.
+    *   Input: `image_url` (required), `model_id`, `user_id`, `app_id` (optional).
     *   Output: Text description of inference results (e.g., concepts detected).
 
 ### Resources (Read-Only)
@@ -138,14 +141,14 @@ The server exposes various Clarifai entities as **read-only** MCP resources, all
 
 ## Architecture Overview
 
-The server listens for JSON-RPC requests over standard input/output (stdio), parses them, and routes them to the appropriate tool handler (`generate_image` or `infer_image`). The handler constructs a gRPC request, adds authentication using the provided PAT, and calls the Clarifai API. The response from the Clarifai API is then formatted back into a JSON-RPC response and sent back to the client via stdio. Large image results can optionally be saved to disk instead of being sent back directly.
+The server listens for JSON-RPC requests over standard input/output (stdio), parses them, and routes them to the appropriate tool handler (`generate_image`, `clarifai_image_by_path`, or `clarifai_image_by_url`). The handler constructs a gRPC request, adds authentication using the provided PAT, and calls the Clarifai API. The response from the Clarifai API is then formatted back into a JSON-RPC response and sent back to the client via stdio. Large image results can optionally be saved to disk instead of being sent back directly.
 
 The codebase is structured into several packages:
 - `cmd/server`: Main application entry point.
 - `internal/config`: Configuration loading (flags).
 - `internal/mcp`: JSON-RPC request/response handling over stdio.
 - `internal/clarifai`: gRPC client setup and API interaction helpers.
-- `internal/tools`: Implementation of the MCP tools (`generate_image`, `infer_image`).
+- `internal/tools`: Implementation of the MCP tools (`generate_image`, `clarifai_image_by_path`, `clarifai_image_by_url`).
 - `internal/utils`: Filesystem utilities (e.g., saving images).
 
 Authentication is handled via a Personal Access Token (PAT) provided as a required command-line argument (`--pat`) when starting the server.
@@ -158,8 +161,8 @@ sequenceDiagram
 
     Client->>+Server: JSON-RPC Request (stdio)
     Server->>Server: Parse JSON-RPC
-    alt Tool Call (e.g., generate_image)
-        Server->>Server: Extract parameters (prompt, model_id, etc.)
+    alt Tool Call (e.g., generate_image, clarifai_image_by_path, clarifai_image_by_url)
+        Server->>Server: Extract parameters (prompt/path/url, model_id, etc.)
         Server->>Server: Create gRPC Request
         Server->>Server: Add PAT to gRPC Context Metadata
         Server->>+Clarifai: PostModelOutputs (gRPC)

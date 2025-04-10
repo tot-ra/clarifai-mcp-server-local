@@ -1,11 +1,12 @@
 package tools
 
 import (
-	"context"
+	"context"       // Needed for image encoding
 	"encoding/json" // Import standard JSON package
 	"fmt"
 	"log/slog"
 	"net/url"
+	"os" // Needed for reading files
 	"strconv"
 	"strings"
 	"time"
@@ -24,6 +25,33 @@ import (
 	statuspb "github.com/Clarifai/clarifai-go-grpc/proto/clarifai/api/status"
 	timestamppb "google.golang.org/protobuf/types/known/timestamppb" // Needed for FilteredModelInfo
 )
+
+// Function to write detailed errors to a log file
+func logErrorToFile(err error, context map[string]string, rpcErr *mcp.RPCError) {
+	// Use an absolute path to avoid CWD issues
+	logFilePath := "/Users/artjom/work/clarifai-mcp-server-local/error.log"
+	file, openErr := os.OpenFile(logFilePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if openErr != nil {
+		slog.Error("Failed to open error log file", "path", logFilePath, "error", openErr)
+		return // Cannot log to file, rely on standard slog
+	}
+	defer file.Close()
+
+	timestamp := time.Now().Format(time.RFC3339)
+	contextJSON, _ := json.Marshal(context)
+	rpcErrJSON, _ := json.Marshal(rpcErr)
+
+	logEntry := fmt.Sprintf("[%s] OriginalError: %v | Context: %s | MappedRPCError: %s\n",
+		timestamp,
+		err,
+		string(contextJSON),
+		string(rpcErrJSON),
+	)
+
+	if _, writeErr := file.WriteString(logEntry); writeErr != nil {
+		slog.Error("Failed to write to error log file", "path", logFilePath, "error", writeErr)
+	}
+}
 
 // FilteredModelInfo defines the subset of fields to return for list operations.
 type FilteredModelInfo struct {
@@ -82,23 +110,20 @@ func NewHandler(client *clarifai.Client, cfg *config.Config) *Handler {
 	}
 }
 
+// Updated toolsDefinitionMap
 var toolsDefinitionMap = map[string]interface{}{
-	"infer_image": map[string]interface{}{
-		"description": "Performs inference on an image using a specified or default Clarifai model. Requires the server to be started with a valid --pat flag.",
+	"clarifai_image_by_path": map[string]interface{}{
+		"description": "Performs inference on a local image file using a specified or default Clarifai model. Defaults to 'general-image-detection' model if none specified.",
 		"inputSchema": map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
-				"image_bytes": map[string]interface{}{
+				"filepath": map[string]interface{}{
 					"type":        "string",
-					"description": "Base64 encoded bytes of the image file.",
-				},
-				"image_url": map[string]interface{}{
-					"type":        "string",
-					"description": "URL of the image file. Provide either image_bytes or image_url.",
+					"description": "Absolute path to the local image file.", // Updated description
 				},
 				"model_id": map[string]interface{}{
 					"type":        "string",
-					"description": "Optional: Specific model ID to use. Defaults to a general classification model if omitted.",
+					"description": "Optional: Specific model ID to use. Defaults to 'general-image-detection' if omitted.", // Updated default model name
 				},
 				"app_id": map[string]interface{}{
 					"type":        "string",
@@ -109,10 +134,32 @@ var toolsDefinitionMap = map[string]interface{}{
 					"description": "Optional: User ID context. Defaults to the user associated with the PAT.",
 				},
 			},
-			"anyOf": []map[string]interface{}{
-				{"required": []string{"image_bytes"}},
-				{"required": []string{"image_url"}},
+			"required": []string{"filepath"},
+		},
+	},
+	"clarifai_image_by_url": map[string]interface{}{
+		"description": "Performs inference on an image URL using a specified or default Clarifai model.",
+		"inputSchema": map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"image_url": map[string]interface{}{
+					"type":        "string",
+					"description": "URL of the image file.",
+				},
+				"model_id": map[string]interface{}{
+					"type":        "string",
+					"description": "Optional: Specific model ID to use. Defaults to a general-image-detection if omitted.",
+				},
+				"app_id": map[string]interface{}{
+					"type":        "string",
+					"description": "Optional: App ID context. Defaults to the app associated with the PAT.",
+				},
+				"user_id": map[string]interface{}{
+					"type":        "string",
+					"description": "Optional: User ID context. Defaults to the user associated with the PAT.",
+				},
 			},
+			"required": []string{"image_url"},
 		},
 	},
 	"generate_image": map[string]interface{}{
@@ -252,7 +299,7 @@ func (h *Handler) HandleRequest(request mcp.JSONRPCRequest) *mcp.JSONRPCResponse
 		response = h.handleCallTool(request)
 	case "resources/templates/list":
 		response = h.handleListResourceTemplates(request)
-	case "resources/list":
+	case "resources/list": // Note: resources/list should ideally call handleListResource, but current code calls handleReadResource. Keeping as is for now.
 		response = h.handleReadResource(request)
 	case "resources/read":
 		response = h.handleReadResource(request)
@@ -317,8 +364,10 @@ func (h *Handler) handleCallTool(request mcp.JSONRPCRequest) mcp.JSONRPCResponse
 	var toolError *mcp.RPCError
 
 	switch request.Params.Name {
-	case "infer_image":
-		toolResult, toolError = h.callInferImage(request.Params.Arguments)
+	case "clarifai_image_by_path":
+		toolResult, toolError = h.callClarifaiImageByPath(request.Params.Arguments)
+	case "clarifai_image_by_url":
+		toolResult, toolError = h.callClarifaiImageByURL(request.Params.Arguments)
 	case "generate_image":
 		toolResult, toolError = h.callGenerateImage(request.Params.Arguments)
 	default:
@@ -404,6 +453,7 @@ func (h *Handler) handleGetResource(request mcp.JSONRPCRequest, userID, appID, r
 	userAppIDSet := &pb.UserAppIDSet{UserId: userID, AppId: appID}
 	var resourceProto proto.Message
 	var apiErr error
+	var errCtx = map[string]string{"userID": userID, "appID": appID, "resourceType": resourceType, "resourceID": resourceID}
 
 	switch resourceType {
 	case "inputs":
@@ -417,20 +467,20 @@ func (h *Handler) handleGetResource(request mcp.JSONRPCRequest, userID, appID, r
 	}
 
 	if apiErr != nil {
-		rpcErr = h.handleApiError(apiErr, resourceType, resourceID)
+		rpcErr = h.handleApiError(apiErr, errCtx)
 		return mcp.NewErrorResponse(request.ID, rpcErr.Code, rpcErr.Message, rpcErr.Data)
 	}
 
 	if resourceProto == nil {
-		rpcErr = h.handleApiError(fmt.Errorf("API response did not contain data"), resourceType, resourceID)
+		rpcErr = h.handleApiError(fmt.Errorf("API response did not contain data"), errCtx)
 		return mcp.NewErrorResponse(request.ID, rpcErr.Code, rpcErr.Message, rpcErr.Data)
 	}
 
 	m := protojson.MarshalOptions{Indent: "  ", EmitUnpopulated: true}
 	resourceJSON, marshalErr := m.Marshal(resourceProto)
 	if marshalErr != nil {
-		h.logger.Error("Failed to marshal resource proto", "error", marshalErr)
-		rpcErr = h.handleApiError(fmt.Errorf("failed to marshal resource data: %w", marshalErr), resourceType, resourceID)
+		h.logger.Error("Failed to marshal resource proto", "error", marshalErr, "resourceType", resourceType, "resourceID", resourceID)
+		rpcErr = h.handleApiError(fmt.Errorf("failed to marshal resource data: %w", marshalErr), errCtx)
 		return mcp.NewErrorResponse(request.ID, rpcErr.Code, rpcErr.Message, rpcErr.Data)
 	}
 
@@ -467,6 +517,14 @@ func (h *Handler) handleListResource(request mcp.JSONRPCRequest, userID, appID, 
 	var results []proto.Message
 	var nextCursor string
 	var apiErr error
+	var errCtx = map[string]string{
+		"userID":       userID,
+		"appID":        appID,
+		"resourceType": resourceType,
+		"parentType":   parentType,
+		"parentID":     parentID,
+		"query":        query,
+	}
 
 	switch resourceType {
 	case "inputs":
@@ -494,7 +552,7 @@ func (h *Handler) handleListResource(request mcp.JSONRPCRequest, userID, appID, 
 	}
 
 	if apiErr != nil {
-		rpcErr = h.handleApiError(apiErr, resourceType, "")
+		rpcErr = h.handleApiError(apiErr, errCtx)
 		return mcp.NewErrorResponse(request.ID, rpcErr.Code, rpcErr.Message, rpcErr.Data)
 	}
 
@@ -550,14 +608,14 @@ func (h *Handler) handleListResource(request mcp.JSONRPCRequest, userID, appID, 
 					Status:             v.ModelVersion.Status,
 					ActiveConceptCount: v.ModelVersion.ActiveConceptCount,
 					// Assign Summary from Metrics if Metrics is not nil
-					Metrics:            nil,
-					Description:        v.ModelVersion.Description,
-					Visibility:         v.ModelVersion.Visibility,
-					AppID:              v.ModelVersion.AppId,
-					UserID:             v.ModelVersion.UserId,
-					License:            v.ModelVersion.License,
-					OutputInfo:         v.ModelVersion.OutputInfo,
-					InputInfo:          v.ModelVersion.InputInfo,
+					Metrics:     nil,
+					Description: v.ModelVersion.Description,
+					Visibility:  v.ModelVersion.Visibility,
+					AppID:       v.ModelVersion.AppId,
+					UserID:      v.ModelVersion.UserId,
+					License:     v.ModelVersion.License,
+					OutputInfo:  v.ModelVersion.OutputInfo,
+					InputInfo:   v.ModelVersion.InputInfo,
 				}
 				// Safely access Summary
 				if v.ModelVersion.Metrics != nil {
@@ -621,23 +679,43 @@ func (h *Handler) prepareGrpcCall(baseCtx context.Context) (context.Context, con
 	return callCtx, cancel, nil
 }
 
-func (h *Handler) handleApiError(err error, resourceType, resourceID string) *mcp.RPCError {
-	h.logger.Error("API error", "resource_type", resourceType, "resource_id", resourceID, "error", err)
+// handleApiError logs the error with context, writes details to a file, and maps it to an RPCError.
+func (h *Handler) handleApiError(err error, context map[string]string) *mcp.RPCError {
+	logArgs := []interface{}{"error", err}
+	for k, v := range context {
+		if v != "" { // Only log non-empty context values
+			logArgs = append(logArgs, slog.String(k, v))
+		}
+	}
+	h.logger.Error("API error", logArgs...) // Standard log
+
+	var rpcErr *mcp.RPCError // Declare rpcErr variable
 
 	st, ok := status.FromError(err)
 	if ok {
-		switch st.Code() {
-		case codes.NotFound:
-			return &mcp.RPCError{Code: -32002, Message: "Resource not found", Data: fmt.Sprintf("%s/%s", resourceType, resourceID)}
+		// Map specific gRPC codes if needed
+		// Example: Map NotFound specifically
+		if st.Code() == codes.NotFound {
+			rpcErr = &mcp.RPCError{Code: -32002, Message: "Resource not found", Data: context}
 		}
 	}
 
-	grpcErr := clarifai.MapGRPCErrorToJSONRPC(err)
-	if grpcErr != nil {
-		return grpcErr
+	// If not specifically mapped yet, use generic mapping
+	if rpcErr == nil {
+		grpcErr := clarifai.MapGRPCErrorToJSONRPC(err)
+		if grpcErr != nil {
+			grpcErr.Data = context // Add context to the generic error data
+			rpcErr = grpcErr
+		} else {
+			// Fallback for non-gRPC errors
+			rpcErr = &mcp.RPCError{Code: -32000, Message: fmt.Sprintf("Internal server error: %v", err), Data: context}
+		}
 	}
 
-	return &mcp.RPCError{Code: -32000, Message: fmt.Sprintf("Failed to process resource '%s/%s': %v", resourceType, resourceID, err)}
+	// Log detailed error to file before returning
+	logErrorToFile(err, context, rpcErr)
+
+	return rpcErr
 }
 
 func parsePagination(queryParams url.Values, cursor string, logger *slog.Logger) (page, perPage uint32) {
@@ -679,7 +757,8 @@ func (h *Handler) getInput(ctx context.Context, userAppID *pb.UserAppIDSet, inpu
 		return nil, err
 	}
 	if resp.GetStatus().GetCode() != statuspb.StatusCode_SUCCESS {
-		return nil, fmt.Errorf("API error: %s - %s", resp.GetStatus().GetDescription(), resp.GetStatus().GetDetails())
+		// Use the new custom error type
+		return nil, clarifai.NewAPIStatusError(resp.GetStatus())
 	}
 	return resp.Input, nil
 }
@@ -692,7 +771,8 @@ func (h *Handler) getModel(ctx context.Context, userAppID *pb.UserAppIDSet, mode
 		return nil, err
 	}
 	if resp.GetStatus().GetCode() != statuspb.StatusCode_SUCCESS {
-		return nil, fmt.Errorf("API error: %s - %s", resp.GetStatus().GetDescription(), resp.GetStatus().GetDetails())
+		// Use the new custom error type
+		return nil, clarifai.NewAPIStatusError(resp.GetStatus())
 	}
 	return resp.Model, nil
 }
@@ -701,6 +781,7 @@ func (h *Handler) listInputs(ctx context.Context, userAppID *pb.UserAppIDSet, pa
 	var results []proto.Message
 	var nextCursor string
 	var apiErr error
+	// var errCtx = map[string]string{"userID": userAppID.UserId, "appID": userAppID.AppId, "resourceType": "input", "query": query} // Removed unused declaration
 
 	if query != "" {
 		h.logger.Debug("Calling PostInputsSearches", "user_id", userAppID.UserId, "app_id", userAppID.AppId, "query", query, "page", pagination.Page, "per_page", pagination.PerPage)
@@ -708,10 +789,14 @@ func (h *Handler) listInputs(ctx context.Context, userAppID *pb.UserAppIDSet, pa
 		grpcRequest := &pb.PostInputsSearchesRequest{UserAppId: userAppID, Searches: []*pb.Search{{Query: searchQueryProto}}, Pagination: pagination}
 		resp, err := h.clarifaiClient.API.PostInputsSearches(ctx, grpcRequest)
 		apiErr = err
-		if err == nil {
+		if err != nil {
+			// Error occurred during the API call itself
+		} else { // No API call error, check status
 			if resp.GetStatus().GetCode() != statuspb.StatusCode_SUCCESS {
-				apiErr = fmt.Errorf("API error: %s - %s", resp.GetStatus().GetDescription(), resp.GetStatus().GetDetails())
+				// Use the new custom error type
+				apiErr = clarifai.NewAPIStatusError(resp.GetStatus())
 			} else {
+				// Success case
 				results = make([]proto.Message, 0, len(resp.Hits))
 				for _, hit := range resp.Hits {
 					if hit.Input != nil {
@@ -722,16 +807,20 @@ func (h *Handler) listInputs(ctx context.Context, userAppID *pb.UserAppIDSet, pa
 					nextCursor = strconv.Itoa(int(pagination.Page + 1))
 				}
 			}
-		}
+		} // End of outer else (no API call error)
 	} else {
 		h.logger.Debug("Calling ListInputs", "user_id", userAppID.UserId, "app_id", userAppID.AppId, "page", pagination.Page, "per_page", pagination.PerPage)
 		grpcRequest := &pb.ListInputsRequest{UserAppId: userAppID, Page: pagination.Page, PerPage: pagination.PerPage}
 		resp, err := h.clarifaiClient.API.ListInputs(ctx, grpcRequest)
 		apiErr = err
-		if err == nil {
+		if err != nil {
+			// Error occurred during the API call itself
+		} else { // No API call error, check status
 			if resp.GetStatus().GetCode() != statuspb.StatusCode_SUCCESS {
-				apiErr = fmt.Errorf("API error: %s - %s", resp.GetStatus().GetDescription(), resp.GetStatus().GetDetails())
+				// Use the new custom error type
+				apiErr = clarifai.NewAPIStatusError(resp.GetStatus())
 			} else {
+				// Success case
 				results = make([]proto.Message, 0, len(resp.Inputs))
 				for _, input := range resp.Inputs {
 					results = append(results, input)
@@ -740,7 +829,12 @@ func (h *Handler) listInputs(ctx context.Context, userAppID *pb.UserAppIDSet, pa
 					nextCursor = strconv.Itoa(int(pagination.Page + 1))
 				}
 			}
-		}
+		} // End of outer else (no API call error)
+	}
+	// Check apiErr before returning
+	if apiErr != nil {
+		// If there was an error (either from the call or status check), log it with context
+		// Note: handleApiError is called within the main handleListResource function if apiErr is not nil
 	}
 	return results, nextCursor, apiErr
 }
@@ -749,6 +843,7 @@ func (h *Handler) listModels(ctx context.Context, userAppID *pb.UserAppIDSet, pa
 	var results []proto.Message
 	var nextCursor string
 	var apiErr error
+	// var errCtx = map[string]string{"userID": userAppID.UserId, "appID": userAppID.AppId, "resourceType": "model", "query": query} // Removed unused declaration
 
 	if query != "" {
 		h.logger.Warn("Query parameter is not yet supported for listing models", "query", query)
@@ -758,10 +853,14 @@ func (h *Handler) listModels(ctx context.Context, userAppID *pb.UserAppIDSet, pa
 		grpcRequest := &pb.ListModelsRequest{UserAppId: userAppID, Page: pagination.Page, PerPage: pagination.PerPage}
 		resp, err := h.clarifaiClient.API.ListModels(ctx, grpcRequest)
 		apiErr = err
-		if err == nil {
+		if err != nil {
+			// Error occurred during the API call itself
+		} else { // No API call error, check status
 			if resp.GetStatus().GetCode() != statuspb.StatusCode_SUCCESS {
-				apiErr = fmt.Errorf("API error: %s - %s", resp.GetStatus().GetDescription(), resp.GetStatus().GetDetails())
+				// Use the new custom error type
+				apiErr = clarifai.NewAPIStatusError(resp.GetStatus())
 			} else {
+				// Success case
 				results = make([]proto.Message, 0, len(resp.Models))
 				for _, model := range resp.Models {
 					results = append(results, model)
@@ -770,68 +869,236 @@ func (h *Handler) listModels(ctx context.Context, userAppID *pb.UserAppIDSet, pa
 					nextCursor = strconv.Itoa(int(pagination.Page + 1))
 				}
 			}
-		}
+		} // End of outer else (no API call error)
+	}
+	// Check apiErr before returning
+	if apiErr != nil {
+		// If there was an error (either from the call or status check), log it with context
+		// Note: handleApiError is called within the main handleListResource function if apiErr is not nil
 	}
 	return results, nextCursor, apiErr
 }
 
-func (h *Handler) callInferImage(args map[string]interface{}) (interface{}, *mcp.RPCError) {
-	h.logger.Debug("Executing callInferImage tool")
+// callClarifaiImageByPath handles inference requests using a local file path.
+func (h *Handler) callClarifaiImageByPath(args map[string]interface{}) (interface{}, *mcp.RPCError) {
+	h.logger.Debug("Executing callClarifaiImageByPath tool")
 
-	imageBytesB64, bytesOk := args["image_bytes"].(string)
-	imageURL, urlOk := args["image_url"].(string)
-
-	if (!bytesOk || imageBytesB64 == "") && (!urlOk || imageURL == "") {
-		return nil, &mcp.RPCError{Code: -32602, Message: "Invalid params: missing or invalid 'image_bytes' or 'image_url'"}
-	}
-	if bytesOk && imageBytesB64 != "" && urlOk && imageURL != "" {
-		return nil, &mcp.RPCError{Code: -32602, Message: "Invalid params: provide either 'image_bytes' or 'image_url', not both"}
+	filepath, pathOk := args["filepath"].(string)
+	if !pathOk || filepath == "" {
+		return nil, &mcp.RPCError{Code: -32602, Message: "Invalid params: missing or invalid 'filepath'"}
 	}
 
 	modelID, _ := args["model_id"].(string)
 	userID, _ := args["user_id"].(string)
 	appID, _ := args["app_id"].(string)
 
-	if modelID == "" {
-		modelID = "general-image-recognition"
-		h.logger.Debug("No model_id provided, defaulting", "model_id", modelID)
+	// Determine effective user/app/model IDs
+	effectiveUserID := userID
+	effectiveAppID := appID
+	effectiveModelID := modelID
+
+	if effectiveModelID == "" {
+		effectiveModelID = "general-image-detection" // Default model
+		h.logger.Debug("No model_id provided, defaulting", "model_id", effectiveModelID)
 	}
 
-	inputData := &pb.Data{}
-	if bytesOk && imageBytesB64 != "" {
-		inputData.Image = &pb.Image{Base64: []byte(utils.CleanBase64Data([]byte(imageBytesB64)))}
-		h.logger.Debug("Using image_bytes for inference")
-	} else {
-		inputData.Image = &pb.Image{Url: imageURL}
-		h.logger.Debug("Using image_url for inference", "url", imageURL)
+	// Special handling for general-image-detection model
+	if effectiveModelID == "general-image-detection" && effectiveUserID == "" && effectiveAppID == "" {
+		effectiveUserID = "clarifai"
+		effectiveAppID = "main"
+		h.logger.Debug("Using default user/app for general-image-detection", "user_id", effectiveUserID, "app_id", effectiveAppID)
 	}
+
+	// Use configured defaults if args are empty
+	if effectiveUserID == "" {
+		effectiveUserID = h.config.DefaultUserID
+		h.logger.Debug("Using default user ID from config", "user_id", effectiveUserID)
+	}
+	if effectiveAppID == "" {
+		effectiveAppID = h.config.DefaultAppID
+		h.logger.Debug("Using default app ID from config", "app_id", effectiveAppID)
+	}
+
+	// Prepare error context map
+	errCtx := map[string]string{
+		"tool":     "clarifai_image_by_path",
+		"filepath": filepath,
+		"userID":   effectiveUserID,
+		"appID":    effectiveAppID,
+		"modelID":  effectiveModelID,
+	}
+
+	// Read file content
+	imageBytes, err := os.ReadFile(filepath)
+	if err != nil {
+		h.logger.Error("Failed to read image file", "filepath", filepath, "error", err)
+		return nil, &mcp.RPCError{Code: -32000, Message: fmt.Sprintf("Failed to read image file: %v", err), Data: errCtx}
+	}
+
+	// Encode to base64
+	// Encode to base64 - NO LONGER NEEDED FOR API CALL
+	// imageBase64 := base64.StdEncoding.EncodeToString(imageBytes)
+
+	inputData := &pb.Data{
+		Image: &pb.Image{Base64: imageBytes}, // Send raw image bytes directly
+	}
+	h.logger.Debug("Using raw image_bytes from file for inference", "filepath", filepath, "byte_count", len(imageBytes))
 
 	grpcRequest := &pb.PostModelOutputsRequest{
-		UserAppId: &pb.UserAppIDSet{UserId: userID, AppId: appID},
-		ModelId:   modelID,
+		UserAppId: &pb.UserAppIDSet{UserId: effectiveUserID, AppId: effectiveAppID},
+		ModelId:   effectiveModelID,
 		Inputs:    []*pb.Input{{Data: inputData}},
 	}
 
 	ctx, cancel, rpcErr := h.prepareGrpcCall(context.Background())
 	if rpcErr != nil {
+		rpcErr.Data = errCtx // Add context to initialization errors
 		return nil, rpcErr
 	}
 	defer cancel()
 
-	h.logger.Debug("Making gRPC call to PostModelOutputs", "timeout", h.timeoutSec)
+	h.logger.Debug("Making gRPC call to PostModelOutputs (by path)", "timeout", h.timeoutSec, "user_id", effectiveUserID, "app_id", effectiveAppID, "model_id", effectiveModelID)
 	resp, err := h.clarifaiClient.API.PostModelOutputs(ctx, grpcRequest)
-	h.logger.Debug("gRPC call to PostModelOutputs finished.")
+	h.logger.Debug("gRPC call to PostModelOutputs (by path) finished.")
 
 	if err != nil {
-		return nil, h.handleApiError(err, "model_output", modelID)
+		return nil, h.handleApiError(err, errCtx)
 	}
 	if resp.GetStatus().GetCode() != statuspb.StatusCode_SUCCESS {
-		return nil, h.handleApiError(fmt.Errorf("API error: %s - %s", resp.GetStatus().GetDescription(), resp.GetStatus().GetDetails()), "model_output", modelID)
+		// Use the new custom error type
+		apiErr := clarifai.NewAPIStatusError(resp.GetStatus())
+		return nil, h.handleApiError(apiErr, errCtx)
 	}
 	if len(resp.Outputs) == 0 || resp.Outputs[0].Data == nil {
-		return nil, h.handleApiError(fmt.Errorf("API response did not contain output data"), "model_output", modelID)
+		// Keep this as fmt.Errorf as it's not directly from API status
+		apiErr := fmt.Errorf("API response did not contain output data")
+		return nil, h.handleApiError(apiErr, errCtx)
 	}
 
+	// Marshal the raw response to JSON
+	m := protojson.MarshalOptions{Indent: "  ", EmitUnpopulated: true}
+	rawResponseJSON, marshalErr := m.Marshal(resp)
+	if marshalErr != nil {
+		h.logger.Error("Failed to marshal raw API response", "error", marshalErr)
+		// Keep this as fmt.Errorf as it's not directly from API status
+		apiErr := fmt.Errorf("failed to marshal raw API response: %w", marshalErr)
+		return nil, h.handleApiError(apiErr, errCtx)
+	}
+
+	h.logger.Debug("Inference successful (by path), returning raw response.")
+
+	// // Process and return results (similar to original infer_image)
+	// concepts := resp.Outputs[0].Data.GetConcepts() // Commented out as requested
+	// var conceptStrings []string
+	// if concepts != nil {
+	// 	for _, c := range concepts {
+	// 		conceptStrings = append(conceptStrings, fmt.Sprintf("%s: %.2f", c.Name, c.Value))
+	// 	}
+	// } else {
+	// 	h.logger.Warn("No concepts found in inference response")
+	// }
+
+	// h.logger.Debug("Inference successful (by path)", "concepts_found", len(conceptStrings))
+
+	// resultText := "Inference Concepts: " + strings.Join(conceptStrings, ", ")
+	// if len(conceptStrings) == 0 {
+	// 	resultText = "Inference successful, but no concepts met the threshold or model doesn't output concepts."
+	// }
+
+	toolResult := map[string]interface{}{
+		"content": []map[string]any{
+			{"type": "text", "text": string(rawResponseJSON)}, // Return raw JSON response
+		},
+	}
+	return toolResult, nil
+}
+
+// callClarifaiImageByURL handles inference requests using an image URL.
+func (h *Handler) callClarifaiImageByURL(args map[string]interface{}) (interface{}, *mcp.RPCError) {
+	h.logger.Debug("Executing callClarifaiImageByURL tool")
+
+	imageURL, urlOk := args["image_url"].(string)
+	if !urlOk || imageURL == "" {
+		return nil, &mcp.RPCError{Code: -32602, Message: "Invalid params: missing or invalid 'image_url'"}
+	}
+
+	modelID, _ := args["model_id"].(string)
+	userID, _ := args["user_id"].(string)
+	appID, _ := args["app_id"].(string)
+
+	// Determine effective user/app/model IDs
+	effectiveUserID := userID
+	effectiveAppID := appID
+	effectiveModelID := modelID
+
+	if effectiveModelID == "" {
+		effectiveModelID = "general-image-detection" // Default model
+		h.logger.Debug("No model_id provided, defaulting", "model_id", effectiveModelID)
+	}
+
+	// Special handling for general-image-detection model
+	if effectiveModelID == "general-image-detection" && effectiveUserID == "" && effectiveAppID == "" {
+		effectiveUserID = "clarifai"
+		effectiveAppID = "main"
+		h.logger.Debug("Using default user/app for general-image-detection", "user_id", effectiveUserID, "app_id", effectiveAppID)
+	}
+
+	// Use configured defaults if args are empty
+	if effectiveUserID == "" {
+		effectiveUserID = h.config.DefaultUserID
+		h.logger.Debug("Using default user ID from config", "user_id", effectiveUserID)
+	}
+	if effectiveAppID == "" {
+		effectiveAppID = h.config.DefaultAppID
+		h.logger.Debug("Using default app ID from config", "app_id", effectiveAppID)
+	}
+
+	// Prepare error context map
+	errCtx := map[string]string{
+		"tool":     "clarifai_image_by_url",
+		"imageURL": imageURL,
+		"userID":   effectiveUserID,
+		"appID":    effectiveAppID,
+		"modelID":  effectiveModelID,
+	}
+
+	inputData := &pb.Data{
+		Image: &pb.Image{Url: imageURL},
+	}
+	h.logger.Debug("Using image_url for inference", "url", imageURL)
+
+	grpcRequest := &pb.PostModelOutputsRequest{
+		UserAppId: &pb.UserAppIDSet{UserId: effectiveUserID, AppId: effectiveAppID},
+		ModelId:   effectiveModelID,
+		Inputs:    []*pb.Input{{Data: inputData}},
+	}
+
+	ctx, cancel, rpcErr := h.prepareGrpcCall(context.Background())
+	if rpcErr != nil {
+		rpcErr.Data = errCtx // Add context to initialization errors
+		return nil, rpcErr
+	}
+	defer cancel()
+
+	h.logger.Debug("Making gRPC call to PostModelOutputs (by URL)", "timeout", h.timeoutSec, "user_id", effectiveUserID, "app_id", effectiveAppID, "model_id", effectiveModelID)
+	resp, err := h.clarifaiClient.API.PostModelOutputs(ctx, grpcRequest)
+	h.logger.Debug("gRPC call to PostModelOutputs (by URL) finished.")
+
+	if err != nil {
+		return nil, h.handleApiError(err, errCtx)
+	}
+	if resp.GetStatus().GetCode() != statuspb.StatusCode_SUCCESS {
+		// Use the new custom error type
+		apiErr := clarifai.NewAPIStatusError(resp.GetStatus())
+		return nil, h.handleApiError(apiErr, errCtx)
+	}
+	if len(resp.Outputs) == 0 || resp.Outputs[0].Data == nil {
+		// Keep this as fmt.Errorf as it's not directly from API status
+		apiErr := fmt.Errorf("API response did not contain output data")
+		return nil, h.handleApiError(apiErr, errCtx)
+	}
+
+	// Process and return results (similar to original infer_image)
 	concepts := resp.Outputs[0].Data.GetConcepts()
 	var conceptStrings []string
 	if concepts != nil {
@@ -842,7 +1109,7 @@ func (h *Handler) callInferImage(args map[string]interface{}) (interface{}, *mcp
 		h.logger.Warn("No concepts found in inference response")
 	}
 
-	h.logger.Debug("Inference successful", "concepts_found", len(conceptStrings))
+	h.logger.Debug("Inference successful (by URL)", "concepts_found", len(conceptStrings))
 
 	resultText := "Inference Concepts: " + strings.Join(conceptStrings, ", ")
 	if len(conceptStrings) == 0 {
@@ -869,22 +1136,46 @@ func (h *Handler) callGenerateImage(args map[string]interface{}) (interface{}, *
 	userID, _ := args["user_id"].(string)
 	appID, _ := args["app_id"].(string)
 
-	if modelID == "" {
-		modelID = "stable-diffusion-xl"
-		h.logger.Debug("No model_id provided, defaulting", "model_id", modelID)
-		if userID == "" {
-			userID = "stability-ai"
-			h.logger.Debug("Defaulting user_id", "user_id", userID, "model_id", modelID)
+	// Determine effective user/app/model IDs
+	effectiveUserID := userID
+	effectiveAppID := appID
+	effectiveModelID := modelID
+
+	if effectiveModelID == "" {
+		effectiveModelID = "stable-diffusion-xl"
+		h.logger.Debug("No model_id provided, defaulting", "model_id", effectiveModelID)
+		if effectiveUserID == "" {
+			effectiveUserID = "stability-ai"
+			h.logger.Debug("Defaulting user_id", "user_id", effectiveUserID, "model_id", effectiveModelID)
 		}
-		if appID == "" {
-			appID = "stable-diffusion-2"
-			h.logger.Debug("Defaulting app_id", "app_id", appID, "model_id", modelID)
+		if effectiveAppID == "" {
+			effectiveAppID = "stable-diffusion-2"
+			h.logger.Debug("Defaulting app_id", "app_id", effectiveAppID, "model_id", effectiveModelID)
 		}
 	}
 
+	// Use configured defaults if args are empty (though less likely for generation)
+	if effectiveUserID == "" {
+		effectiveUserID = h.config.DefaultUserID
+		h.logger.Debug("Using default user ID from config", "user_id", effectiveUserID)
+	}
+	if effectiveAppID == "" {
+		effectiveAppID = h.config.DefaultAppID
+		h.logger.Debug("Using default app ID from config", "app_id", effectiveAppID)
+	}
+
+	// Prepare error context map
+	errCtx := map[string]string{
+		"tool":       "generate_image",
+		"textPrompt": textPrompt, // Be mindful of logging sensitive prompts if applicable
+		"userID":     effectiveUserID,
+		"appID":      effectiveAppID,
+		"modelID":    effectiveModelID,
+	}
+
 	grpcRequest := &pb.PostModelOutputsRequest{
-		UserAppId: &pb.UserAppIDSet{UserId: userID, AppId: appID},
-		ModelId:   modelID,
+		UserAppId: &pb.UserAppIDSet{UserId: effectiveUserID, AppId: effectiveAppID},
+		ModelId:   effectiveModelID,
 		Inputs: []*pb.Input{
 			{
 				Data: &pb.Data{
@@ -898,22 +1189,27 @@ func (h *Handler) callGenerateImage(args map[string]interface{}) (interface{}, *
 
 	ctx, cancel, rpcErr := h.prepareGrpcCall(context.Background())
 	if rpcErr != nil {
+		rpcErr.Data = errCtx // Add context to initialization errors
 		return nil, rpcErr
 	}
 	defer cancel()
 
-	h.logger.Debug("Making gRPC call to PostModelOutputs", "timeout", h.timeoutSec)
+	h.logger.Debug("Making gRPC call to PostModelOutputs (generate)", "timeout", h.timeoutSec, "user_id", effectiveUserID, "app_id", effectiveAppID, "model_id", effectiveModelID)
 	resp, err := h.clarifaiClient.API.PostModelOutputs(ctx, grpcRequest)
-	h.logger.Debug("gRPC call to PostModelOutputs finished.")
+	h.logger.Debug("gRPC call to PostModelOutputs (generate) finished.")
 
 	if err != nil {
-		return nil, h.handleApiError(err, "model_output", modelID)
+		return nil, h.handleApiError(err, errCtx)
 	}
 	if resp.GetStatus().GetCode() != statuspb.StatusCode_SUCCESS {
-		return nil, h.handleApiError(fmt.Errorf("API error: %s - %s", resp.GetStatus().GetDescription(), resp.GetStatus().GetDetails()), "model_output", modelID)
+		// Use the new custom error type
+		apiErr := clarifai.NewAPIStatusError(resp.GetStatus())
+		return nil, h.handleApiError(apiErr, errCtx)
 	}
 	if len(resp.Outputs) == 0 || resp.Outputs[0].Data == nil || resp.Outputs[0].Data.Image == nil {
-		return nil, h.handleApiError(fmt.Errorf("API response did not contain image data"), "model_output", modelID)
+		// Keep this as fmt.Errorf as it's not directly from API status
+		apiErr := fmt.Errorf("API response did not contain image data")
+		return nil, h.handleApiError(apiErr, errCtx)
 	}
 
 	imageBase64Bytes := resp.Outputs[0].Data.Image.Base64

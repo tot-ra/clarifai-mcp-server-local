@@ -164,38 +164,42 @@ func TestHandleApiError(t *testing.T) {
 
 	t.Run("Not Found Error", func(t *testing.T) {
 		grpcErr := status.Error(codes.NotFound, "resource not found")
-		rpcErr := handler.handleApiError(grpcErr, "inputs", "input123")
+		testCtx := map[string]string{"resourceType": "inputs", "resourceID": "input123"}
+		rpcErr := handler.handleApiError(grpcErr, testCtx)
 		assert.NotNil(t, rpcErr)
 		assert.Equal(t, -32002, rpcErr.Code)
 		assert.Equal(t, "Resource not found", rpcErr.Message)
-		assert.Equal(t, "inputs/input123", rpcErr.Data)
+		assert.Equal(t, testCtx, rpcErr.Data) // Check if context is passed correctly
 	})
 
 	t.Run("Permission Denied Error", func(t *testing.T) {
 		grpcErr := status.Error(codes.PermissionDenied, "invalid PAT")
-		rpcErr := handler.handleApiError(grpcErr, "models", "model456")
+		testCtx := map[string]string{"resourceType": "models", "resourceID": "model456"}
+		rpcErr := handler.handleApiError(grpcErr, testCtx)
 		assert.NotNil(t, rpcErr)
-		// Correct assertion based on clarifai.MapGRPCErrorToJSONRPC
-		assert.Equal(t, -32003, rpcErr.Code)
-		assert.Equal(t, "invalid PAT", rpcErr.Message) // Should return the original gRPC message
+		assert.Equal(t, -32003, rpcErr.Code) // Correct assertion based on clarifai.MapGRPCErrorToJSONRPC
+		assert.Equal(t, "invalid PAT", rpcErr.Message)
+		assert.Equal(t, testCtx, rpcErr.Data) // Check context
 	})
 
 	t.Run("Generic gRPC Error", func(t *testing.T) {
 		grpcErr := status.Error(codes.Unavailable, "connection failed")
-		rpcErr := handler.handleApiError(grpcErr, "inputs", "")
+		testCtx := map[string]string{"resourceType": "inputs", "resourceID": ""}
+		rpcErr := handler.handleApiError(grpcErr, testCtx)
 		assert.NotNil(t, rpcErr)
-		// Correct assertion based on clarifai.MapGRPCErrorToJSONRPC
-		assert.Equal(t, -32004, rpcErr.Code)
-		assert.Equal(t, "connection failed", rpcErr.Message) // Should return the original gRPC message
+		assert.Equal(t, -32004, rpcErr.Code) // Correct assertion based on clarifai.MapGRPCErrorToJSONRPC
+		assert.Equal(t, "connection failed", rpcErr.Message)
+		assert.Equal(t, testCtx, rpcErr.Data) // Check context
 	})
 
 	t.Run("Non-gRPC Error", func(t *testing.T) {
 		genericErr := errors.New("something went wrong")
-		rpcErr := handler.handleApiError(genericErr, "outputs", "out789")
+		testCtx := map[string]string{"resourceType": "outputs", "resourceID": "out789"}
+		rpcErr := handler.handleApiError(genericErr, testCtx)
 		assert.NotNil(t, rpcErr)
 		assert.Equal(t, -32000, rpcErr.Code)
-		// Correct assertion based on clarifai.MapGRPCErrorToJSONRPC
 		assert.Equal(t, "Internal server error: something went wrong", rpcErr.Message)
+		assert.Equal(t, testCtx, rpcErr.Data) // Check context
 	})
 }
 
@@ -354,7 +358,7 @@ func TestCallInferImage_Success_Bytes(t *testing.T) {
 	mockAPI := new(MockClarifaiAPIClient)
 	handler := setupTestHandler(mockAPI)
 	reqID := "req-infer-bytes-1"
-	modelID := "general-image-recognition"
+	modelID := "general-image-detection"
 
 	mockResp := &pb.MultiOutputResponse{ // Correct response type
 		Status: successStatus(), // Use helper

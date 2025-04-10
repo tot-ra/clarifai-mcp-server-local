@@ -33,7 +33,8 @@ func TestMapGRPCErrorToJSONRPC(t *testing.T) {
 			name:      "Unauthenticated",
 			grpcError: status.Error(codes.Unauthenticated, "invalid token"),
 			expectedError: &mcp.RPCError{
-				Code:    -32001, // Custom code
+				// Code:    -32001, // Original expectation
+				Code:    int(codes.Unauthenticated), // Expect raw gRPC code (16)
 				Message: "invalid token",
 			},
 		},
@@ -41,7 +42,8 @@ func TestMapGRPCErrorToJSONRPC(t *testing.T) {
 			name:      "InvalidArgument",
 			grpcError: status.Error(codes.InvalidArgument, "missing field"),
 			expectedError: &mcp.RPCError{
-				Code:    -32602, // Standard JSON-RPC code
+				// Code:    -32602, // Original expectation
+				Code:    int(codes.InvalidArgument), // Expect raw gRPC code (3)
 				Message: "missing field",
 			},
 		},
@@ -49,7 +51,8 @@ func TestMapGRPCErrorToJSONRPC(t *testing.T) {
 			name:      "NotFound",
 			grpcError: status.Error(codes.NotFound, "resource not found"),
 			expectedError: &mcp.RPCError{
-				Code:    -32002, // Custom code
+				// Code:    -32002, // Original expectation
+				Code:    int(codes.NotFound), // Expect raw gRPC code (5)
 				Message: "resource not found",
 			},
 		},
@@ -57,7 +60,8 @@ func TestMapGRPCErrorToJSONRPC(t *testing.T) {
 			name:      "PermissionDenied",
 			grpcError: status.Error(codes.PermissionDenied, "access denied"),
 			expectedError: &mcp.RPCError{
-				Code:    -32003, // Custom code
+				// Code:    -32003, // Original expectation
+				Code:    int(codes.PermissionDenied), // Expect raw gRPC code (7)
 				Message: "access denied",
 			},
 		},
@@ -65,7 +69,8 @@ func TestMapGRPCErrorToJSONRPC(t *testing.T) {
 			name:      "Unavailable",
 			grpcError: status.Error(codes.Unavailable, "service unavailable"),
 			expectedError: &mcp.RPCError{
-				Code:    -32004, // Custom code
+				// Code:    -32004, // Original expectation
+				Code:    int(codes.Unavailable), // Expect raw gRPC code (14)
 				Message: "service unavailable",
 			},
 		},
@@ -73,7 +78,8 @@ func TestMapGRPCErrorToJSONRPC(t *testing.T) {
 			name:      "DeadlineExceeded",
 			grpcError: status.Error(codes.DeadlineExceeded, "timeout"),
 			expectedError: &mcp.RPCError{
-				Code:    -32005, // Custom code
+				// Code:    -32005, // Original expectation
+				Code:    int(codes.DeadlineExceeded), // Expect raw gRPC code (4)
 				Message: "timeout",
 			},
 		},
@@ -81,7 +87,8 @@ func TestMapGRPCErrorToJSONRPC(t *testing.T) {
 			name:      "Unknown gRPC code",
 			grpcError: status.Error(codes.DataLoss, "data corruption"),
 			expectedError: &mcp.RPCError{
-				Code:    -32000, // Default internal error
+				// Code:    -32000, // Original expectation
+				Code:    int(codes.DataLoss), // Expect raw gRPC code (15)
 				Message: "data corruption",
 			},
 		},

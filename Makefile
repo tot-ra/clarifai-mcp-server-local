@@ -16,6 +16,12 @@ build:
 	GOOS=$(GOOS) GOARCH=$(GOARCH) go build -o $(OUTPUT_BINARY) .
 	@echo "Build successful! Binary created at $(OUTPUT_BINARY)"
 
+test:
+	@echo "Running tests..."
+	@go test ./... -v
+	@echo "All tests passed!"
+
+
 # Clean the output binary
 clean:
 	@echo "Cleaning build artifacts..."

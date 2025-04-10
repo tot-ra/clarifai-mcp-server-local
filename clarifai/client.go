@@ -65,6 +65,8 @@ type V2ClientInterface interface {
 	// Annotation methods used in handler
 	ListAnnotations(ctx context.Context, in *pb.ListAnnotationsRequest, opts ...grpc.CallOption) (*pb.MultiAnnotationResponse, error)
 	GetAnnotation(ctx context.Context, in *pb.GetAnnotationRequest, opts ...grpc.CallOption) (*pb.SingleAnnotationResponse, error)
+	// Add PostInputs for the new tool
+	PostInputs(ctx context.Context, in *pb.PostInputsRequest, opts ...grpc.CallOption) (*pb.MultiInputResponse, error)
 	// Add other methods here if they become needed by the server
 }
 

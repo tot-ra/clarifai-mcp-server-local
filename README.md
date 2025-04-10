@@ -70,6 +70,10 @@ The server currently exposes the following MCP capabilities:
 
 ### Tools
 
+*   **`upload_file`**: Uploads a local file to Clarifai as an input.
+    *   Input: `filepath` (required, absolute path to the local file), `user_id`, `app_id` (optional).
+    *   Output: Text confirmation and API response details upon successful upload.
+
 *   **`generate_image`**: Generates an image based on a text prompt using a specified or default Clarifai text-to-image model.
     *   Input: `text_prompt` (required), `model_id`, `user_id`, `app_id` (optional).
     *   Output: Base64 encoded image data (for small images) or a file path (for large images saved to the configured `--output-path`).

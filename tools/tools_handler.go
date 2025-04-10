@@ -3,7 +3,6 @@ package tools
 import (
 	"context"
 	"fmt"
-	// "log/slog" // Removed unused import
 	"os"
 
 	"clarifai-mcp-server-local/clarifai"
@@ -92,6 +91,28 @@ var toolsDefinitionMap = map[string]interface{}{
 			"required": []string{"text_prompt"},
 		},
 	},
+	"upload_file": map[string]interface{}{
+		"description": "Uploads a local file to Clarifai as an input.",
+		"inputSchema": map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"filepath": map[string]interface{}{
+					"type":        "string",
+					"description": "Absolute path to the local file to upload.",
+				},
+				"app_id": map[string]interface{}{
+					"type":        "string",
+					"description": "Optional: App ID context. Defaults to the app associated with the PAT.",
+				},
+				"user_id": map[string]interface{}{
+					"type":        "string",
+					"description": "Optional: User ID context. Defaults to the user associated with the PAT.",
+				},
+				// TODO: Add optional input_id, concepts, metadata, geo?
+			},
+			"required": []string{"filepath"},
+		},
+	},
 }
 
 // handleListTools lists the available tools. (Moved from handler.go)
@@ -122,6 +143,8 @@ func (h *Handler) handleCallTool(request mcp.JSONRPCRequest) mcp.JSONRPCResponse
 		toolResult, toolError = h.callClarifaiImageByURL(request.Params.Arguments)
 	case "generate_image":
 		toolResult, toolError = h.callGenerateImage(request.Params.Arguments)
+	case "upload_file":
+		toolResult, toolError = h.callUploadFile(request.Params.Arguments)
 	default:
 		toolError = &mcp.RPCError{Code: -32601, Message: "Tool not found: " + request.Params.Name}
 	}
@@ -238,6 +261,99 @@ func (h *Handler) callClarifaiImageByPath(args map[string]interface{}) (interfac
 	toolResult := map[string]interface{}{
 		"content": []map[string]any{
 			{"type": "text", "text": string(rawResponseJSON)}, // Return raw JSON response
+		},
+	}
+	return toolResult, nil
+}
+
+// callUploadFile handles uploading a local file as a Clarifai input.
+func (h *Handler) callUploadFile(args map[string]interface{}) (interface{}, *mcp.RPCError) {
+	h.logger.Debug("Executing callUploadFile tool")
+
+	filepath, pathOk := args["filepath"].(string)
+	if !pathOk || filepath == "" {
+		return nil, &mcp.RPCError{Code: -32602, Message: "Invalid params: missing or invalid 'filepath'"}
+	}
+
+	userID, _ := args["user_id"].(string)
+	appID, _ := args["app_id"].(string)
+
+	// Determine effective user/app IDs
+	effectiveUserID := userID
+	effectiveAppID := appID
+
+	// Use configured defaults if args are empty
+	if effectiveUserID == "" {
+		effectiveUserID = h.config.DefaultUserID
+		h.logger.Debug("Using default user ID from config", "user_id", effectiveUserID)
+	}
+	if effectiveAppID == "" {
+		effectiveAppID = h.config.DefaultAppID
+		h.logger.Debug("Using default app ID from config", "app_id", effectiveAppID)
+	}
+
+	// Prepare error context map
+	errCtx := map[string]string{
+		"tool":     "upload_file",
+		"filepath": filepath,
+		"userID":   effectiveUserID,
+		"appID":    effectiveAppID,
+	}
+
+	// Read file content
+	fileBytes, err := os.ReadFile(filepath)
+	if err != nil {
+		h.logger.Error("Failed to read file for upload", "filepath", filepath, "error", err)
+		return nil, &mcp.RPCError{Code: -32000, Message: fmt.Sprintf("Failed to read file: %v", err), Data: errCtx}
+	}
+
+	h.logger.Debug("Read file", "filepath", filepath, "original_size", len(fileBytes))
+
+	// Prepare input proto - Assuming image for now.
+	// Pass raw file bytes directly, matching e2e tests. gRPC library handles encoding.
+	inputData := &pb.Input{
+		Data: &pb.Data{
+			Image: &pb.Image{Base64: fileBytes},
+		},
+		// TODO: Add optional fields like ID, concepts, metadata, geo here if provided in args
+	}
+
+	userAppIDSet := &pb.UserAppIDSet{UserId: effectiveUserID, AppId: effectiveAppID}
+
+	ctx, cancel, rpcErr := utils.PrepareGrpcCall(context.Background(), h.clarifaiClient, h.pat, h.timeoutSec)
+	if rpcErr != nil {
+		rpcErr.Data = errCtx // Add context to initialization errors
+		return nil, rpcErr
+	}
+	defer cancel()
+
+	h.logger.Debug("Making gRPC call to PostInputs (upload)", "timeout", h.timeoutSec, "user_id", effectiveUserID, "app_id", effectiveAppID)
+	resp, err := h.clarifaiClient.PostInputs(ctx, userAppIDSet, []*pb.Input{inputData}, h.logger) // Use the new API wrapper
+	h.logger.Debug("gRPC call to PostInputs (upload) finished.")
+
+	if err != nil {
+		return nil, utils.HandleApiError(err, errCtx, h.logger)
+	}
+	// PostInputs already checks status code in the wrapper
+
+	// Marshal the raw response to JSON for user visibility
+	m := protojson.MarshalOptions{Indent: "  ", EmitUnpopulated: true}
+	rawResponseJSON, marshalErr := m.Marshal(resp)
+	if marshalErr != nil {
+		h.logger.Error("Failed to marshal PostInputs response", "error", marshalErr)
+		// Don't fail the whole operation, just log it. The upload succeeded.
+	}
+
+	h.logger.Debug("File upload successful.")
+
+	resultText := "File uploaded successfully."
+	if rawResponseJSON != nil {
+		resultText += "\nAPI Response:\n" + string(rawResponseJSON)
+	}
+
+	toolResult := map[string]interface{}{
+		"content": []map[string]any{
+			{"type": "text", "text": resultText},
 		},
 	}
 	return toolResult, nil

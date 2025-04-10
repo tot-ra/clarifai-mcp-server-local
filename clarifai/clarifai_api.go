@@ -88,6 +88,20 @@ func (c *Client) ListInputs(ctx context.Context, userAppID *pb.UserAppIDSet, pag
 	return results, nextCursor, apiErr
 }
 
+// PostInputs uploads new inputs to the Clarifai API.
+func (c *Client) PostInputs(ctx context.Context, userAppID *pb.UserAppIDSet, inputs []*pb.Input, logger *slog.Logger) (*pb.MultiInputResponse, error) { // Changed response type
+	logger.Debug("Calling PostInputs", "user_id", userAppID.UserId, "app_id", userAppID.AppId, "input_count", len(inputs))
+	grpcRequest := &pb.PostInputsRequest{UserAppId: userAppID, Inputs: inputs}
+	resp, err := c.API.PostInputs(ctx, grpcRequest) // Assuming the method call itself is correct now
+	if err != nil {
+		return nil, err
+	}
+	if resp.GetStatus().GetCode() != statuspb.StatusCode_SUCCESS {
+		return nil, NewAPIStatusError(resp.GetStatus())
+	}
+	return resp, nil
+}
+
 // ListModels lists models from the Clarifai API. Querying is not currently supported here.
 func (c *Client) ListModels(ctx context.Context, userAppID *pb.UserAppIDSet, pagination *pb.Pagination, query string, logger *slog.Logger) ([]proto.Message, string, error) {
 	var results []proto.Message

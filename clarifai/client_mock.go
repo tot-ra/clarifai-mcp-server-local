@@ -19,6 +19,7 @@ type MockV2Client struct {
 	// Add fields for new interface methods
 	ListAnnotationsFunc func(ctx context.Context, in *pb.ListAnnotationsRequest, opts ...grpc.CallOption) (*pb.MultiAnnotationResponse, error)
 	GetAnnotationFunc   func(ctx context.Context, in *pb.GetAnnotationRequest, opts ...grpc.CallOption) (*pb.SingleAnnotationResponse, error)
+	PostInputsFunc      func(ctx context.Context, in *pb.PostInputsRequest, opts ...grpc.CallOption) (*pb.MultiInputResponse, error) // Added for PostInputs
 }
 
 // Ensure MockV2Client implements the V2ClientInterface.
@@ -94,6 +95,15 @@ func (m *MockV2Client) GetAnnotation(ctx context.Context, in *pb.GetAnnotationRe
 	}
 	// Default mock behavior
 	return &pb.SingleAnnotationResponse{}, nil
+}
+
+// PostInputs calls the mock function or returns default values.
+func (m *MockV2Client) PostInputs(ctx context.Context, in *pb.PostInputsRequest, opts ...grpc.CallOption) (*pb.MultiInputResponse, error) {
+	if m.PostInputsFunc != nil {
+		return m.PostInputsFunc(ctx, in, opts...)
+	}
+	// Default mock behavior
+	return &pb.MultiInputResponse{}, nil
 }
 
 // Helper to create a context with expected metadata for testing PostModelOutputs calls

@@ -141,37 +141,96 @@ The server exposes various Clarifai entities as **read-only** MCP resources, all
 
 ## Architecture Overview
 
-The server listens for JSON-RPC requests over standard input/output (stdio), parses them, and routes them to the appropriate tool handler (`generate_image`, `clarifai_image_by_path`, or `clarifai_image_by_url`). The handler constructs a gRPC request, adds authentication using the provided PAT, and calls the Clarifai API. The response from the Clarifai API is then formatted back into a JSON-RPC response and sent back to the client via stdio. Large image results can optionally be saved to disk instead of being sent back directly.
+The server operates by listening for JSON-RPC 2.0 requests on standard input (stdin) and sending responses via standard output (stdout). This allows seamless integration with MCP client frameworks.
 
-The codebase is structured into several packages:
-- `cmd/server`: Main application entry point.
-- `internal/config`: Configuration loading (flags).
-- `internal/mcp`: JSON-RPC request/response handling over stdio.
-- `internal/clarifai`: gRPC client setup and API interaction helpers.
-- `internal/tools`: Implementation of the MCP tools (`generate_image`, `clarifai_image_by_path`, `clarifai_image_by_url`).
-- `internal/utils`: Filesystem utilities (e.g., saving images).
+**Component Structure:**
 
-Authentication is handled via a Personal Access Token (PAT) provided as a required command-line argument (`--pat`) when starting the server.
+The codebase is organized into several key packages:
+
+```mermaid
+graph TD
+    subgraph "clarifai-mcp-server-local"
+        direction LR
+        CmdServer["cmd/server (main)"] --> MCP["mcp (JSON-RPC/stdio)"]
+        CmdServer --> Config["config (Flags)"]
+        CmdServer --> Tools["tools (Handlers)"]
+        CmdServer --> Resources["resources (Handlers)"]
+
+        MCP --> Tools
+        MCP --> Resources
+
+        Tools --> ClarifaiClient["clarifai (gRPC Client)"]
+        Tools --> Utils["utils (Filesystem)"]
+        Tools --> Config
+
+        Resources --> ClarifaiClient
+        Resources --> Config
+
+        ClarifaiClient --> Config
+    end
+
+    subgraph External
+        MCPClient["MCP Client (e.g., IDE)"] -- stdio --> MCP
+        ClarifaiClient -- gRPC --> ClarifaiAPI["Clarifai API"]
+    end
+
+    style MCPClient fill:#f9f,stroke:#333,stroke-width:2px
+    style ClarifaiAPI fill:#ccf,stroke:#333,stroke-width:2px
+```
+
+*   `cmd/server`: The main application entry point, responsible for initializing configuration, setting up the MCP server instance, and registering handlers.
+*   `config`: Handles command-line flag parsing and stores configuration values (like PAT, output path).
+*   `mcp`: Manages the core MCP communication loop over stdio, parsing incoming JSON-RPC requests and dispatching them to the appropriate handlers based on the method (`tools/call`, `resources/list`, `resources/read`, etc.).
+*   `clarifai`: Contains the gRPC client logic for interacting with the Clarifai API, including authentication (adding the PAT to requests) and making API calls.
+*   `tools`: Implements the logic for each exposed MCP tool (`generate_image`, `clarifai_image_by_path`, `clarifai_image_by_url`). These handlers use the `clarifai` client to perform actions.
+*   `resources`: Implements the logic for handling MCP resource requests (`resources/list`, `resources/read`). These handlers use the `clarifai` client to fetch data.
+*   `utils`: Provides utility functions, such as saving generated images to the local filesystem.
+
+**Request Flow:**
+
+The following sequence diagram illustrates the typical flow for handling tool and resource requests:
 
 ```mermaid
 sequenceDiagram
     participant Client as MCP Client (e.g., IDE)
     participant Server as clarifai-mcp-server (Go)
     participant Clarifai as Clarifai API (gRPC)
+    participant Filesystem as Local Filesystem
 
     Client->>+Server: JSON-RPC Request (stdio)
-    Server->>Server: Parse JSON-RPC
+    Server->>Server: Parse JSON-RPC Request (mcp)
+
     alt Tool Call (e.g., generate_image, clarifai_image_by_path, clarifai_image_by_url)
-        Server->>Server: Extract parameters (prompt/path/url, model_id, etc.)
-        Server->>Server: Create gRPC Request
-        Server->>Server: Add PAT to gRPC Context Metadata
-        Server->>+Clarifai: PostModelOutputs (gRPC)
-        Clarifai-->>-Server: gRPC Response (Image data/Error)
-        Server->>Server: Format JSON-RPC Response
+        Server->>Server: Route to Tool Handler (tools)
+        Server->>Server: Extract tool parameters
+        Server->>Server: Create gRPC Request (clarifai)
+        Server->>Server: Add PAT to gRPC Context Metadata (clarifai)
+        Server->>+Clarifai: Call Clarifai API (gRPC)
+        Clarifai-->>-Server: gRPC Response (Data/Error)
+        alt generate_image and image is large
+            Server->>+Filesystem: Save image to disk (utils, config)
+            Filesystem-->>-Server: File path
+            Server->>Server: Format JSON-RPC Response (with file path) (mcp)
+        else Tool Response (or small image)
+            Server->>Server: Format JSON-RPC Response (with data/results) (mcp)
+        end
+    else Resource Call (e.g., resources/list, resources/read)
+        Server->>Server: Route to Resource Handler (resources)
+        Server->>Server: Parse URI and parameters
+        alt resources/list or search
+            Server->>+Clarifai: Call Clarifai List/Search API (gRPC) (clarifai)
+            Clarifai-->>-Server: gRPC Response (List of items/Error)
+            Server->>Server: Format JSON-RPC Response (List of Resources) (mcp)
+        else resources/read
+            Server->>+Clarifai: Call Clarifai Get API (gRPC) (clarifai)
+            Clarifai-->>-Server: gRPC Response (Item details/Error)
+            Server->>Server: Format JSON-RPC Response (Resource Content) (mcp)
+        end
     else Other MCP Request (e.g., initialize, tools/list)
-        Server->>Server: Handle request internally
-        Server->>Server: Format JSON-RPC Response
+        Server->>Server: Handle request internally (mcp)
+        Server->>Server: Format JSON-RPC Response (mcp)
     end
     Server-->>-Client: JSON-RPC Response (stdio)
-
 ```
+
+Authentication relies on the Personal Access Token (PAT) provided via the `--pat` command-line flag, which is included in the metadata of outgoing gRPC requests to the Clarifai API.

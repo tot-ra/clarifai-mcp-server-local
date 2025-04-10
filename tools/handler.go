@@ -1098,27 +1098,21 @@ func (h *Handler) callClarifaiImageByURL(args map[string]interface{}) (interface
 		return nil, h.handleApiError(apiErr, errCtx)
 	}
 
-	// Process and return results (similar to original infer_image)
-	concepts := resp.Outputs[0].Data.GetConcepts()
-	var conceptStrings []string
-	if concepts != nil {
-		for _, c := range concepts {
-			conceptStrings = append(conceptStrings, fmt.Sprintf("%s: %.2f", c.Name, c.Value))
-		}
-	} else {
-		h.logger.Warn("No concepts found in inference response")
+	// Marshal the raw response to JSON
+	m := protojson.MarshalOptions{Indent: "  ", EmitUnpopulated: true}
+	rawResponseJSON, marshalErr := m.Marshal(resp)
+	if marshalErr != nil {
+		h.logger.Error("Failed to marshal raw API response", "error", marshalErr)
+		// Keep this as fmt.Errorf as it's not directly from API status
+		apiErr := fmt.Errorf("failed to marshal raw API response: %w", marshalErr)
+		return nil, h.handleApiError(apiErr, errCtx)
 	}
 
-	h.logger.Debug("Inference successful (by URL)", "concepts_found", len(conceptStrings))
-
-	resultText := "Inference Concepts: " + strings.Join(conceptStrings, ", ")
-	if len(conceptStrings) == 0 {
-		resultText = "Inference successful, but no concepts met the threshold or model doesn't output concepts."
-	}
+	h.logger.Debug("Inference successful (by URL), returning raw response.")
 
 	toolResult := map[string]interface{}{
 		"content": []map[string]any{
-			{"type": "text", "text": resultText},
+			{"type": "text", "text": string(rawResponseJSON)}, // Return raw JSON response
 		},
 	}
 	return toolResult, nil

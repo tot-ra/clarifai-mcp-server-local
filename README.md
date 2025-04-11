@@ -6,6 +6,7 @@ This hackday project provides a Model Context Protocol (MCP) server that acts as
 
 It allows MCP clients (like IDE extensions) to interact with Clarifai, such as image generation and inference, using standard MCP requests without overloading LLM context with heavy binary results.
 
+https://www.youtube.com/embed/aSuJxq1txm0
 
 ## Configuring MCP server for seamless interaction
 

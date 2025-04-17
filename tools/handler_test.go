@@ -6,7 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"      // Add http import
+	"net/http/httptest" // Add httptest import
 	"os"
+	"strings" // Add strings import
 	"testing"
 	"time"
 
@@ -22,6 +25,7 @@ import (
 	"google.golang.org/grpc" // Import grpc package
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+
 	// "google.golang.org/protobuf/encoding/protojson" // Removed unused import
 	"google.golang.org/protobuf/types/known/structpb" // Import structpb
 	timestamppb "google.golang.org/protobuf/types/known/timestamppb"
@@ -96,6 +100,15 @@ func (m *MockClarifaiAPIClient) GetAnnotation(ctx context.Context, req *pb.GetAn
 		return nil, args.Error(1)
 	}
 	return args.Get(0).(*pb.SingleAnnotationResponse), args.Error(1)
+}
+
+// Add missing PostInputs method
+func (m *MockClarifaiAPIClient) PostInputs(ctx context.Context, req *pb.PostInputsRequest, opts ...grpc.CallOption) (*pb.MultiInputResponse, error) {
+	args := m.Called(ctx, req) // Do not pass mockOpts explicitly
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).(*pb.MultiInputResponse), args.Error(1)
 }
 
 // --- Test Setup ---
@@ -407,8 +420,8 @@ func TestCallClarifaiImageByPath_FileReadError(t *testing.T) {
 
 	// Assertions for the error case
 	assert.NotNil(t, resp)
-	assert.Nil(t, resp.Result) // Expect no result on error
-	assert.NotNil(t, resp.Error) // Expect an error
+	assert.Nil(t, resp.Result)               // Expect no result on error
+	assert.NotNil(t, resp.Error)             // Expect an error
 	assert.Equal(t, -32000, resp.Error.Code) // Expect internal server error code
 	assert.Contains(t, resp.Error.Message, "Failed to read image file")
 	assert.Contains(t, resp.Error.Message, "no such file or directory")
@@ -419,7 +432,6 @@ func TestCallClarifaiImageByPath_FileReadError(t *testing.T) {
 
 // TODO: Add a separate test for the success path of clarifai_image_by_path
 // This would require mocking os.ReadFile or using a real temp file.
-
 
 func TestHandleListResource_ListModels_Filtered(t *testing.T) {
 	mockAPI := new(MockClarifaiAPIClient)
@@ -513,3 +525,326 @@ func TestHandleListResource_ListModels_Filtered(t *testing.T) {
 // - callGenerateImage success (file output)
 // - callTool with invalid arguments
 // - callTool with API errors
+
+// --- Search Tool Tests ---
+
+func TestCallSearchByText_Success(t *testing.T) {
+	mockAPI := new(MockClarifaiAPIClient)
+	handler := setupTestHandler(mockAPI)
+	reqID := "req-search-text-1"
+	userID := "test-user"
+	appID := "test-app"
+	queryText := "search for cats"
+	page := uint32(2)
+	perPage := uint32(10)
+
+	// Expected request
+	// expectedQueryProto := &pb.Query{ // Removed unused variable
+	// 	Ranks: []*pb.Rank{
+	// 		{Annotation: &pb.Annotation{Data: &pb.Data{Text: &pb.Text{Raw: queryText}}}},
+	// 	},
+	// }
+	// expectedPagination := &pb.Pagination{Page: page, PerPage: perPage} // Removed unused variable
+	// expectedGrpcReq := &pb.PostInputsSearchesRequest{ // Removed unused variable
+	// 	UserAppId:  &pb.UserAppIDSet{UserId: userID, AppId: appID},
+	// 	Searches:   []*pb.Search{{Query: expectedQueryProto}},
+	// 	Pagination: expectedPagination,
+	// } // Removed extra brace
+
+	// --- Mock HTTP Server for Text Fetching ---
+	mockTextContent := "This is the fetched raw text content for cats."
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Check Authorization header (optional but good practice)
+		authHeader := r.Header.Get("Authorization")
+		if authHeader != "Key test-pat" {
+			t.Logf("Warning: Missing or incorrect Authorization header in test request: %s", authHeader)
+			// http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			// return
+		}
+		fmt.Fprintln(w, mockTextContent)
+	}))
+	defer server.Close()
+	mockTextURL := server.URL // Use the mock server's URL
+
+	// Mock response - Include Text.Url
+	mockHit := &pb.Hit{
+		Score: 0.99,
+		Input: &pb.Input{
+			Id: "hit-input-1",
+			Data: &pb.Data{
+				Text: &pb.Text{
+					// Raw: "a cat", // Raw is now fetched
+					Url: mockTextURL, // Provide the URL for fetching
+				},
+			},
+		},
+	}
+	mockResp := &pb.MultiSearchResponse{
+		Status: successStatus(),
+		Hits:   []*pb.Hit{mockHit},
+	}
+
+	mockAPI.On("PostInputsSearches", mock.Anything, mock.MatchedBy(func(r *pb.PostInputsSearchesRequest) bool {
+		// Basic check - more detailed proto comparison might be needed
+		return r.UserAppId.UserId == userID &&
+			r.UserAppId.AppId == appID &&
+			len(r.Searches) == 1 &&
+			r.Searches[0].Query.Ranks[0].Annotation.Data.Text.Raw == queryText &&
+			r.Pagination.Page == page &&
+			r.Pagination.PerPage == perPage
+	})).Return(mockResp, nil)
+
+	req := mcp.JSONRPCRequest{
+		JSONRPC: "2.0",
+		ID:      reqID,
+		Method:  "tools/call",
+		Params: mcp.RequestParams{
+			Name: "search_by_text",
+			Arguments: map[string]interface{}{
+				"query":    queryText,
+				"user_id":  userID,
+				"app_id":   appID,
+				"page":     float64(page), // JSON numbers are float64
+				"per_page": float64(perPage),
+			},
+		},
+	}
+
+	resp := handler.HandleRequest(req)
+
+	assert.NotNil(t, resp)
+	assert.Nil(t, resp.Error)
+	assert.NotNil(t, resp.Result)
+	resultMap, ok := resp.Result.(map[string]interface{})
+	assert.True(t, ok)
+	contents, ok := resultMap["content"].([]map[string]any)
+	assert.True(t, ok)
+	assert.Len(t, contents, 1)
+	assert.Equal(t, "text", contents[0]["type"])
+
+	// Unmarshal the JSON response and check the ID and fetched raw text
+	var resultData map[string]interface{}
+	err := json.Unmarshal([]byte(contents[0]["text"].(string)), &resultData)
+	assert.NoError(t, err)
+	hits, _ := resultData["hits"].([]interface{})
+	assert.Len(t, hits, 1)
+	hitMap, _ := hits[0].(map[string]interface{})
+	inputMap, _ := hitMap["input"].(map[string]interface{})
+	assert.Equal(t, "hit-input-1", inputMap["id"]) // Assert specific ID value
+	// Check fetched text
+	dataMap, _ := inputMap["data"].(map[string]interface{})
+	textMap, _ := dataMap["text"].(map[string]interface{})
+	assert.Equal(t, mockTextURL, textMap["url"]) // Verify URL is still present
+	// Trim newline added by fmt.Fprintln
+	assert.Equal(t, mockTextContent, strings.TrimSpace(textMap["raw"].(string)))
+
+	mockAPI.AssertExpectations(t)
+}
+
+func TestCallSearchByFilepath_Success(t *testing.T) {
+	mockAPI := new(MockClarifaiAPIClient)
+	handler := setupTestHandler(mockAPI)
+	reqID := "req-search-file-1"
+	userID := "test-user"
+	appID := "test-app"
+
+	// Create a temporary file
+	tmpFile, err := os.CreateTemp("", "test-image-*.jpg")
+	assert.NoError(t, err)
+	defer os.Remove(tmpFile.Name()) // Clean up after test
+
+	dummyImageData := []byte("dummyimagedata")
+	_, err = tmpFile.Write(dummyImageData)
+	assert.NoError(t, err)
+	err = tmpFile.Close()
+	assert.NoError(t, err)
+	filePath := tmpFile.Name()
+
+	// Expected request
+	// expectedQueryProto := &pb.Query{ // Removed unused variable
+	// 	Ranks: []*pb.Rank{
+	// 		{Annotation: &pb.Annotation{Data: &pb.Data{Image: &pb.Image{Base64: dummyImageData}}}},
+	// 	},
+	// }
+	// expectedGrpcReq := &pb.PostInputsSearchesRequest{ // Removed unused variable
+	// 	UserAppId:  &pb.UserAppIDSet{UserId: userID, AppId: appID},
+	// 	Searches:   []*pb.Search{{Query: expectedQueryProto}},
+	// 	Pagination: &pb.Pagination{}, // Expect default pagination
+	// } // Removed extra brace
+
+	// --- Mock HTTP Server for Text Fetching ---
+	mockTextContentFile := "This is the fetched raw text content for the file search."
+	serverFile := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintln(w, mockTextContentFile)
+	}))
+	defer serverFile.Close()
+	mockTextURLFile := serverFile.URL
+
+	// Mock response - Include Text.Url if the input is text
+	// If the input is expected to be image, the text fetching part might not apply
+	// For this test, let's assume the hit *could* have associated text data with a URL
+	mockHit := &pb.Hit{
+		Score: 0.98,
+		Input: &pb.Input{
+			Id: "hit-input-file-1",
+			Data: &pb.Data{
+				// Image: &pb.Image{Url: "some_image_url.jpg"}, // Original input might be image
+				Text: &pb.Text{Url: mockTextURLFile}, // Add a text URL to test fetching
+			},
+		},
+	}
+	mockResp := &pb.MultiSearchResponse{
+		Status: successStatus(),
+		Hits:   []*pb.Hit{mockHit},
+	}
+
+	mockAPI.On("PostInputsSearches", mock.Anything, mock.MatchedBy(func(r *pb.PostInputsSearchesRequest) bool {
+		return r.UserAppId.UserId == userID &&
+			r.UserAppId.AppId == appID &&
+			len(r.Searches) == 1 &&
+			string(r.Searches[0].Query.Ranks[0].Annotation.Data.Image.Base64) == string(dummyImageData) && // Compare bytes
+			r.Pagination.Page == 1 && // Correct default pagination
+			r.Pagination.PerPage == 10 // Correct default pagination
+	})).Return(mockResp, nil)
+
+	req := mcp.JSONRPCRequest{
+		JSONRPC: "2.0",
+		ID:      reqID,
+		Method:  "tools/call",
+		Params: mcp.RequestParams{
+			Name: "search_by_filepath",
+			Arguments: map[string]interface{}{
+				"filepath": filePath,
+				"user_id":  userID,
+				"app_id":   appID,
+				// No pagination args provided
+			},
+		},
+	}
+
+	resp := handler.HandleRequest(req)
+
+	assert.NotNil(t, resp)
+	assert.Nil(t, resp.Error)
+	assert.NotNil(t, resp.Result)
+	resultMap, ok := resp.Result.(map[string]interface{})
+	assert.True(t, ok)
+	contents, ok := resultMap["content"].([]map[string]any)
+	assert.True(t, ok)
+	assert.Len(t, contents, 1)
+	assert.Equal(t, "text", contents[0]["type"])
+
+	// Unmarshal the JSON response and check the ID and fetched raw text
+	var resultData map[string]interface{}
+	err = json.Unmarshal([]byte(contents[0]["text"].(string)), &resultData)
+	assert.NoError(t, err)
+	hits, _ := resultData["hits"].([]interface{})
+	assert.Len(t, hits, 1)
+	hitMap, _ := hits[0].(map[string]interface{})
+	inputMap, _ := hitMap["input"].(map[string]interface{})
+	assert.Equal(t, "hit-input-file-1", inputMap["id"]) // Assert specific ID value
+	// Check fetched text
+	dataMap, _ := inputMap["data"].(map[string]interface{})
+	textMap, _ := dataMap["text"].(map[string]interface{})
+	assert.Equal(t, mockTextURLFile, textMap["url"])
+	assert.Equal(t, mockTextContentFile, strings.TrimSpace(textMap["raw"].(string)))
+
+	mockAPI.AssertExpectations(t)
+}
+
+func TestCallSearchByURL_Success(t *testing.T) {
+	mockAPI := new(MockClarifaiAPIClient)
+	handler := setupTestHandler(mockAPI)
+	reqID := "req-search-url-1"
+	userID := "test-user"
+	appID := "test-app"
+	imageURL := "http://example.com/image.jpg"
+
+	// Expected request
+	// expectedQueryProto := &pb.Query{ // Removed unused variable
+	// 	Ranks: []*pb.Rank{
+	// 		{Annotation: &pb.Annotation{Data: &pb.Data{Image: &pb.Image{Url: imageURL}}}},
+	// 	},
+	// }
+	// expectedGrpcReq := &pb.PostInputsSearchesRequest{ // Removed unused variable
+	// 	UserAppId:  &pb.UserAppIDSet{UserId: userID, AppId: appID},
+	// 	Searches:   []*pb.Search{{Query: expectedQueryProto}},
+	// 	Pagination: &pb.Pagination{}, // Expect default pagination
+	// } // Removed extra brace
+
+	// --- Mock HTTP Server for Text Fetching ---
+	mockTextContentURL := "This is the fetched raw text content for the URL search."
+	serverURL := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintln(w, mockTextContentURL)
+	}))
+	defer serverURL.Close()
+	mockTextURLURL := serverURL.URL
+
+	// Mock response - Include Text.Url
+	mockHit := &pb.Hit{
+		Score: 0.97,
+		Input: &pb.Input{
+			Id: "hit-input-url-1",
+			Data: &pb.Data{
+				// Image: &pb.Image{Url: imageURL}, // Original input might be image
+				Text: &pb.Text{Url: mockTextURLURL}, // Add a text URL to test fetching
+			},
+		},
+	}
+	mockResp := &pb.MultiSearchResponse{
+		Status: successStatus(),
+		Hits:   []*pb.Hit{mockHit},
+	}
+
+	mockAPI.On("PostInputsSearches", mock.Anything, mock.MatchedBy(func(r *pb.PostInputsSearchesRequest) bool {
+		return r.UserAppId.UserId == userID &&
+			r.UserAppId.AppId == appID &&
+			len(r.Searches) == 1 &&
+			r.Searches[0].Query.Ranks[0].Annotation.Data.Image.Url == imageURL &&
+			r.Pagination.Page == 1 && // Correct default pagination
+			r.Pagination.PerPage == 10 // Correct default pagination
+	})).Return(mockResp, nil)
+
+	req := mcp.JSONRPCRequest{
+		JSONRPC: "2.0",
+		ID:      reqID,
+		Method:  "tools/call",
+		Params: mcp.RequestParams{
+			Name: "search_by_url",
+			Arguments: map[string]interface{}{
+				"image_url": imageURL,
+				"user_id":   userID,
+				"app_id":    appID,
+			},
+		},
+	}
+
+	resp := handler.HandleRequest(req)
+
+	assert.NotNil(t, resp)
+	assert.Nil(t, resp.Error)
+	assert.NotNil(t, resp.Result)
+	resultMap, ok := resp.Result.(map[string]interface{})
+	assert.True(t, ok)
+	contents, ok := resultMap["content"].([]map[string]any)
+	assert.True(t, ok)
+	assert.Len(t, contents, 1)
+	assert.Equal(t, "text", contents[0]["type"])
+
+	// Unmarshal the JSON response and check the ID and fetched raw text
+	var resultData map[string]interface{}
+	err := json.Unmarshal([]byte(contents[0]["text"].(string)), &resultData)
+	assert.NoError(t, err)
+	hits, _ := resultData["hits"].([]interface{})
+	assert.Len(t, hits, 1)
+	hitMap, _ := hits[0].(map[string]interface{})
+	inputMap, _ := hitMap["input"].(map[string]interface{})
+	assert.Equal(t, "hit-input-url-1", inputMap["id"]) // Assert specific ID value
+	// Check fetched text
+	dataMap, _ := inputMap["data"].(map[string]interface{})
+	textMap, _ := dataMap["text"].(map[string]interface{})
+	assert.Equal(t, mockTextURLURL, textMap["url"])
+	assert.Equal(t, mockTextContentURL, strings.TrimSpace(textMap["raw"].(string)))
+
+	mockAPI.AssertExpectations(t)
+}

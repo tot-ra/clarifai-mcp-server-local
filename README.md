@@ -100,6 +100,18 @@ and places results on Desktop
     *   Input: `image_url` (required), `model_id`, `user_id`, `app_id` (optional).
     *   Output: Text description of inference results (e.g., concepts detected).
 
+*   **`search_by_text`**: Searches inputs based on a text query using Clarifai's PostInputSearches.
+    *   Input: `query` (required, text query string), `user_id`, `app_id`, `page`, `per_page` (optional).
+    *   Output: JSON string containing the search results (hits).
+
+*   **`search_by_filepath`**: Searches inputs based on similarity to a local image file using Clarifai's PostInputSearches.
+    *   Input: `filepath` (required, absolute path to the local image file), `user_id`, `app_id`, `page`, `per_page` (optional).
+    *   Output: JSON string containing the search results (hits).
+
+*   **`search_by_url`**: Searches inputs based on similarity to an image URL using Clarifai's PostInputSearches.
+    *   Input: `image_url` (required, URL of the image), `user_id`, `app_id`, `page`, `per_page` (optional).
+    *   Output: JSON string containing the search results (hits).
+
 <img src="./docs/Screenshot 2025-04-10 at 03.38.17.png" width=600 />
 
 ### Resources (Read-Only)

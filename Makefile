@@ -12,6 +12,7 @@ all: build
 
 # Build the main package
 build:
+	go mod tidy
 	@echo "Building for $(GOOS)/$(GOARCH)..."
 	GOOS=$(GOOS) GOARCH=$(GOARCH) go build -o $(OUTPUT_BINARY) .
 	@echo "Build successful! Binary created at $(OUTPUT_BINARY)"

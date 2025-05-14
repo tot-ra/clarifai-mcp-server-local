@@ -5,6 +5,7 @@ import (
 	"log/slog" // Use slog
 	"math/rand"
 	"os"
+	"path/filepath" // Import filepath package
 	"strings"
 	"time"
 )
@@ -27,7 +28,7 @@ func SaveImage(outputPath string, imageBase64Bytes []byte) (string, error) {
 		imageBase64String = imageBase64String[commaIndex+1:]
 		// Re-convert cleaned string back to bytes for saving
 		// Note: This assumes the original bytes included the prefix. If not, this step might be unnecessary.
-		// Consider if the input `imageBase64Bytes` is guaranteed to be *just* the base64 data.
+		// Consider if the input `imageBase664Bytes` is guaranteed to be *just* the base64 data.
 		// For now, we'll work with the potentially cleaned string converted back to bytes.
 		// TODO: Re-evaluate if decoding/re-encoding is needed or if we can save original bytes after check.
 		// imageBase64Bytes = []byte(imageBase64String) // Re-assigning bytes after cleaning string
@@ -81,4 +82,21 @@ func CleanBase64Data(data []byte) string {
 	}
 	// Trim again after potential removal
 	return strings.TrimSpace(dataString)
+}
+
+// GetFileType determines the file type based on the file extension.
+func GetFileType(filePath string) string {
+	ext := strings.ToLower(filepath.Ext(filePath))
+	switch ext {
+	case ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tiff", ".webp":
+		return "image"
+	case ".mp4", ".avi", ".mov", ".wmv", ".flv", ".webm":
+		return "video"
+	case ".mp3", ".wav", ".aac", ".flac", ".ogg":
+		return "audio"
+	case ".txt", ".csv", ".json", ".xml", ".html", ".go", ".py", ".js", ".css":
+		return "text"
+	default:
+		return "unknown"
+	}
 }

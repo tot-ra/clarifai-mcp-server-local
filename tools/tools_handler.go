@@ -1195,13 +1195,34 @@ func (h *Handler) callUploadFile(args map[string]interface{}) (interface{}, *mcp
 
 	h.logger.Debug("Read file", "filepath", filepath, "original_size", len(fileBytes))
 
-	// Prepare input proto - Assuming image for now.
-	// Pass raw file bytes directly, matching e2e tests. gRPC library handles encoding.
+	// Determine file type
+	fileType := utils.GetFileType(filepath)
+	h.logger.Debug("Determined file type", "filepath", filepath, "file_type", fileType)
+
+	// Prepare input proto based on file type
 	inputData := &pb.Input{
-		Data: &pb.Data{
-			Image: &pb.Image{Base64: fileBytes},
-		},
+		Data: &pb.Data{},
 		// TODO: Add optional fields like ID, concepts, metadata, geo here if provided in args
+	}
+
+	switch fileType {
+	case "image":
+		inputData.Data.Image = &pb.Image{Base64: fileBytes}
+		h.logger.Debug("Populating Image field for upload")
+	case "video":
+		inputData.Data.Video = &pb.Video{Base64: fileBytes}
+		h.logger.Debug("Populating Video field for upload")
+	case "audio":
+		inputData.Data.Audio = &pb.Audio{Base64: fileBytes}
+		h.logger.Debug("Populating Audio field for upload")
+	case "text":
+		inputData.Data.Text = &pb.Text{Raw: string(fileBytes)}
+		h.logger.Debug("Populating Text field for upload")
+	default:
+		// Handle unknown file types - maybe return an error or default to text?
+		// For now, let's return an error.
+		h.logger.Error("Unsupported file type for upload", "filepath", filepath, "file_type", fileType)
+		return nil, &mcp.RPCError{Code: -32602, Message: fmt.Sprintf("Unsupported file type for upload: %s", fileType), Data: errCtx}
 	}
 
 	userAppIDSet := &pb.UserAppIDSet{UserId: effectiveUserID, AppId: effectiveAppID}
